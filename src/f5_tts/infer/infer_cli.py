@@ -194,7 +194,7 @@ ref_text = (
     if args.ref_text is not None
     else config.get("ref_text", "Some call me nature, others call me mother nature.")
 )
-gen_text = args.gen_text or config.get("gen_text", "Here we generate something just for test.")
+gen_text = args.gen_text or config.get("gen_text", "让我们一起说中文。")
 gen_file = args.gen_file or config.get("gen_file", "")
 
 output_dir = args.output_dir or config.get("output_dir", "tests")

@@ -239,6 +239,11 @@ class CFM(nn.Module):
         # handle raw wave
         if inp.ndim == 2:
             inp = self.mel_spec(inp)
+            # inp1 = self.mel_spec(inp1)
+            # inp2 = self.mel_spec(inp2)
+            # inp = func(inp1, inp2)
+            
+
             inp = inp.permute(0, 2, 1)
             assert inp.shape[-1] == self.num_channels
 
