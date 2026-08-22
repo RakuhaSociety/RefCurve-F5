@@ -4,40 +4,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-这是 F5-TTS 的**改造版本（fork）**，核心目标是**多参考音频特征混合与情绪迁移**。原版 F5-TTS 是基于流匹配（Flow Matching）+ 扩散 Transformer 的零样本 TTS 系统。
+这是 **RefCurve-F5** —— [F5-TTS](https://github.com/SWivid/F5-TTS) 的改造版本，核心目标是**多参考音频特征混合与曲线控制**。原版 F5-TTS 是基于流匹配（Flow Matching）+ 扩散 Transformer 的零样本 TTS 系统。
 
-改造是**侵入式**的：推理管线的函数签名被直接修改，而不是新增旁路。理解这一点比理解任何单个函数都重要（见下节）。
+`RefCurve` 是方法名（多参考 + 曲线控制），本仓库是它在 F5-TTS 上的实现；未来可能移植到 GPT-SoVITS（`RefCurve-SoVITS`）。
 
-## ⚠️ Git 状态：所有改造都未提交
+当前基线：上游 **v1.1.22**（2026-07-23）。上游 remote 为 `upstream`，同步用 `git fetch upstream && git merge upstream/main`。
 
-本仓库是原版 F5-TTS 的克隆，**全部改造内容都以未提交的工作区改动形式存在**：
+## 推理管线签名（已与上游兼容）
 
-- 被修改的原版文件（4 个）：`src/f5_tts/model/cfm.py`、`src/f5_tts/infer/utils_infer.py`、`src/f5_tts/infer/infer_cli.py`、`src/f5_tts/infer/examples/basic/basic.toml`
-- 未跟踪的新增：`gradio_mix_demo.py`、`tools/`、两个 `.bat`、`index.html`、示例音频、`f5-tts_env/` 等
-
-两个推论：`git diff` 就是改造与上游的完整差异，想弄清"哪些是 fork 加的"直接看它；**绝对不要跑丢弃工作区的命令**——`git checkout .` / `git restore .` / `git stash` 会抹掉 `cfm.py` 等核心混合逻辑，`git clean -fd` 会删掉所有未跟踪的新文件（包括整个 Python 环境）。
-
-## ⚠️ 关键：双参考已成为推理管线的必需参数
-
-`infer_process()`（[src/f5_tts/infer/utils_infer.py:383](src/f5_tts/infer/utils_infer.py#L383)）的签名已被改造，第二参考音频是**必需位置参数**，共 7 个必需位置参数：
+`infer_process()` 的位置参数与上游一致，第二参考是**关键字可选参数**：
 
 ```python
-infer_process(ref_audio, ref_text, ref_audio_2, ref_text_2, gen_text, model_obj, vocoder, ...)
-#                                  ^^^^^^^^^^^  ^^^^^^^^^^^  插在 gen_text 之前
+infer_process(ref_audio, ref_text, gen_text, model_obj, vocoder,
+              ref_audio_2=None, ref_text_2="", ...)   # 省略即单参考
 ```
 
-**由此产生的已知破损**——这两个原版调用点从未同步更新，仍按旧的 5 参数顺序调用：
-
-- [src/f5_tts/api.py:124](src/f5_tts/api.py#L124) — `F5TTS` Python API 类
-- [src/f5_tts/infer/infer_gradio.py:179](src/f5_tts/infer/infer_gradio.py#L179) — 原版 Gradio 界面（即 `f5-tts_infer-gradio`）
-
-`infer_gradio.py` 只传 5 个位置参数、`api.py` 传 6 个，均少于必需的 7 个，因此调用时直接抛 `TypeError: infer_process() missing N required positional arguments`——连参数错位后的 `torchaudio.load()` 都到不了。**所以 `f5-tts_infer-gradio` 和 `from f5_tts.api import F5TTS` 目前是不可用的**，不要假设原版入口还能跑。
-
-与之相对，`infer_batch_process()` 的第二参考是**带默认值的关键字参数**（`ref_audio_2=None, ref_text_2=""`），且内部有 `ref_audio_2 is None` 时克隆首个参考、退化为单参考的分支（[utils_infer.py:511](src/f5_tts/infer/utils_infer.py#L511)）。所以它对旧调用者保持兼容——`socket_server.py` 正因如此未受影响。
-
-修复 `infer_process` 时有两条路：把两个第二参考参数改成同样的关键字默认值形式（内层退化分支已经就绪，改签名即可同时恢复两个原版入口），或逐个修正上述调用点的实参顺序。前者更省事且不破坏现有混合调用。
-
-`infer_cli.py` 和 `gradio_mix_demo.py` 已适配新签名，可正常工作。
+`ref_audio_2=None` 时克隆首参考退化为单参考，所以 `api.py`、`infer_gradio.py`、`socket_server.py` 等上游调用点均正常可用。**改动此签名时务必保持这一兼容性**，否则会再次破坏上游入口。
 
 ## 启动方式
 
@@ -140,7 +122,7 @@ A = 情绪基准, B = 情绪目标, C = 声线基底
 
 **ASR 用 FunASR Paraformer 而非原版 Whisper**（`_get_paraformer_asr()`，中文效果更好且不依赖 FFmpeg），需 `funasr` + `modelscope`——它们在 `pyproject.toml` 里属于 `[eval]` 可选依赖，默认安装不含，需 `pip install funasr modelscope`。转写结果经 `_clean_cn_text()` 清洗。参考文本留空时才触发 ASR；后端里若 ASR 仍得空则填 `"."` 跳过。
 
-**PyTorch 版本注意**：`pyproject.toml` 钉 `torch==2.4.0`（cu124 索引），但 `f5-tts_env` 里实际装的是 **torch 2.8.0+cu128**，仓库根还躺着一个 `torch-2.9.0+cu130` 的 whl。以环境实测为准，别信 pyproject 的钉版。
+**PyTorch 版本注意**：`pyproject.toml` 已随上游放宽为 `torch>=2.0.0`，便携环境 `f5-tts_env` 实装 **torch 2.8.0+cu128**。原先的 cu124 uv 索引已在对齐上游时移除。
 
 ## 原版功能（未改造部分）
 
@@ -181,6 +163,8 @@ pre-commit run --all-files
 仓库无测试套件，无 pytest 配置。验证手段：
 
 - 推理：`f5-tts_infer-cli -c src/f5_tts/infer/examples/basic/basic.toml`，输出到 `tests/infer_cli_basic.wav`
+  - **注意**：`infer_cli.py` 的声码器本地路径硬编码为 `../checkpoints/vocos-mel-24khz`（与实际 `ckpts/` 不符，且未开放为命令行参数），走本地声码器会失败。此问题继承自上游，尚未修复。
+  - 绕开方式：直接在 Python 里调 `load_vocoder('vocos', is_local=True, local_path='ckpts/vocos-mel-24khz', ...)` + `infer_process()`
 - 混合参数：启动试验台，先用 `lerp` + `linear` 建立基线，再改单个参数对比
 - 训练：小数据子集跑 1 个 epoch
 

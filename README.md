@@ -1,278 +1,221 @@
-# F5-TTS: A Fairytaler that Fakes Fluent and Faithful Speech with Flow Matching
+# RefCurve-F5
 
-[![python](https://img.shields.io/badge/Python-3.10-brightgreen)](https://github.com/SWivid/F5-TTS)
-[![arXiv](https://img.shields.io/badge/arXiv-2410.06885-b31b1b.svg?logo=arXiv)](https://arxiv.org/abs/2410.06885)
-[![demo](https://img.shields.io/badge/GitHub-Demo-orange.svg)](https://swivid.github.io/F5-TTS/)
-[![hfspace](https://img.shields.io/badge/🤗-HF%20Space-yellow)](https://huggingface.co/spaces/mrfakename/E2-F5-TTS)
-[![msspace](https://img.shields.io/badge/🤖-MS%20Space-blue)](https://modelscope.cn/studios/AI-ModelScope/E2-F5-TTS)
-[![lab](https://img.shields.io/badge/🏫-X--LANCE-grey?labelColor=lightgrey)](https://x-lance.sjtu.edu.cn/)
-[![lab](https://img.shields.io/badge/🏫-SII-grey?labelColor=lightgrey)](https://www.sii.edu.cn/)
-[![lab](https://img.shields.io/badge/🏫-PCL-grey?labelColor=lightgrey)](https://www.pcl.ac.cn)
-<!-- <img src="https://github.com/user-attachments/assets/12d7749c-071a-427c-81bf-b87b91def670" alt="Watermark" style="width: 40px; height: auto"> -->
+**多参考音频混合与曲线控制的语音合成** — 基于 [F5-TTS](https://github.com/SWivid/F5-TTS) 实现。
 
-**F5-TTS**: Diffusion Transformer with ConvNeXt V2, faster trained and inference.
+> [!IMPORTANT]
+> **本项目不是官方 F5-TTS。** 这是 [SWivid/F5-TTS](https://github.com/SWivid/F5-TTS) 的第三方改造版本，
+> 由个人维护，与原作者及其所属机构无关。原版的问题请到上游仓库反馈。
 
-**E2 TTS**: Flat-UNet Transformer, closest reproduction from [paper](https://arxiv.org/abs/2406.18009).
+`RefCurve` 是一套**方法**：不再"用一段参考音频克隆一个声音"，而是同时给多段参考，
+并用**曲线**精确控制每段参考在生成过程中各处的权重——从而取到各段参考里不同的部分。
+本仓库 `RefCurve-F5` 是它在 F5-TTS 上的实现。
 
-**Sway Sampling**: Inference-time flow step sampling strategy, greatly improves performance
+---
 
-### Thanks to all the contributors !
+## 这是什么
 
-## News
-- **2025/03/12**: 🔥 F5-TTS v1 base model with better training and inference performance. [Few demo](https://swivid.github.io/F5-TTS_updates).
-- **2024/10/08**: F5-TTS & E2 TTS base models on [🤗 Hugging Face](https://huggingface.co/SWivid/F5-TTS), [🤖 Model Scope](https://www.modelscope.cn/models/SWivid/F5-TTS_Emilia-ZH-EN), [🟣 Wisemodel](https://wisemodel.cn/models/SJTU_X-LANCE/F5-TTS_Emilia-ZH-EN).
+标准零样本 TTS 回答的是"让**这个**声音说这句话"。RefCurve 回答的是：
 
-## Installation
+> 让 A 和 B 之间**某个可精确控制的插值点**上的声音说这句话。
 
-### Create a separate environment if needed
+三项能力：
+
+| 能力 | 说明 |
+| --- | --- |
+| **双参考混合** | 同时输入参考 A、B，在扩散采样的每一步融合两者的 mel 条件 |
+| **曲线控制** | 权重不是一个常数，而是沿**时间维度 t**（扩散步）和**帧位置维度 n**（音频时间轴）变化的曲线 |
+| **情绪迁移** | 给定 A(平静)、B(激动)、C(目标音色)，把 `B-A` 的情绪差分迁移到 C 上 |
+
+关键点：混合发生在 **ODE 采样循环内部**，不是把两段音频在波形层面叠加。
+
+```
+参考 A ─┐
+        ├─→ mel → cond_a ─┐
+参考 B ─┘                  ├─ 每个 ODE 步按 α 融合 → Transformer → mel → vocoder → 音频
+             mel → cond_b ─┘
+                            ↑
+                     α = f(t, n) 由曲线决定
+```
+
+## 效果演示
+
+同一段参考音频、同样的生成文本，只改混合参数：
+
+| 样例 | 参数 | 文件 |
+| --- | --- | --- |
+| 参考 A（温柔） | — | [`samples/ref_A_yasashi.wav`](samples/ref_A_yasashi.wav) |
+| 参考 B（平常） | — | [`samples/ref_B_normal.wav`](samples/ref_B_normal.wav) |
+| 单参考（等同原版 F5） | 只用 A | [`samples/01_single_ref.wav`](samples/01_single_ref.wav) |
+| 双参考混合 | `slerp` + `cosine`，A 权重 0.9→0.3 | [`samples/02_mix_slerp_cosine.wav`](samples/02_mix_slerp_cosine.wav) |
+| 2D + 权重外推 | `multiply`，n 维度 1.2→-0.2，开启外推 | [`samples/03_mix_2d_extrapolation.wav`](samples/03_mix_2d_extrapolation.wav) |
+
+> wav 文件需下载后播放，GitHub 不支持在 README 内嵌音频。
+
+## 快速开始
+
+### 环境要求
+
+- Python 3.10+、NVIDIA GPU（CPU 可跑但很慢）
+- 模型文件放在 `ckpts/`：
+  - `ckpts/F5TTS_v1_Base/model_1250000.safetensors` + `vocab.txt`（[下载](https://huggingface.co/SWivid/F5-TTS)）
+  - `ckpts/vocos-mel-24khz/`（[下载](https://huggingface.co/charactr/vocos-mel-24khz)）
+
+### 安装
 
 ```bash
-# Create a conda env with python_version>=3.10  (you could also use virtualenv)
-conda create -n f5-tts python=3.11
-conda activate f5-tts
-
-# Install FFmpeg if you haven't yet
-conda install ffmpeg
+git clone https://github.com/RakuhaSociety/RefCurve-F5.git
+cd RefCurve-F5
+pip install -e .
+pip install funasr modelscope   # 可选：中文自动转写
 ```
 
-### Install PyTorch with matched device
-
-<details>
-<summary>NVIDIA GPU</summary>
-
-> ```bash
-> # Install pytorch with your CUDA version, e.g.
-> pip install torch==2.8.0+cu128 torchaudio==2.8.0+cu128 --extra-index-url https://download.pytorch.org/whl/cu128
-> 
-> # And also possible previous versions, e.g.
-> pip install torch==2.4.0+cu124 torchaudio==2.4.0+cu124 --extra-index-url https://download.pytorch.org/whl/cu124
-> # etc.
-> ```
-
-</details>
-
-<details>
-<summary>AMD GPU</summary>
-
-> ```bash
-> # Install pytorch with your ROCm version (Linux only), e.g.
-> pip install torch==2.9.1+rocm7.2 torchaudio==2.9.1+rocm7.2 --extra-index-url https://download.pytorch.org/whl/rocm7.2
->
-> # For older GPUs (RDNA1/2/3 only):
-> # pip install torch==2.5.1+rocm6.2 torchaudio==2.5.1+rocm6.2 --extra-index-url https://download.pytorch.org/whl/rocm6.2
-> ```
->
-> **Note:** RDNA 3.5 and RDNA 4 GPUs (Radeon 8050S/8060S, RX 9060/9070 series) require
-> ROCm 7.x — these architectures (gfx1151/gfx1201) are not included in ROCm 6.x
-> ([6.2 compatibility matrix](https://rocm.docs.amd.com/en/docs-6.2.4/compatibility/compatibility-matrix.html) vs
-> [7.2 compatibility matrix](https://rocm.docs.amd.com/en/docs-7.2.3/compatibility/compatibility-matrix.html)).
-> Using ROCm 6.x on these GPUs causes `HIP error: invalid device function` ([#1236](https://github.com/SWivid/F5-TTS/issues/1236)).
-
-</details>
-
-<details>
-<summary>Intel GPU</summary>
-
-> ```bash
-> # Install pytorch with your XPU version, e.g.
-> # Intel® Deep Learning Essentials or Intel® oneAPI Base Toolkit must be installed
-> pip install torch torchaudio --index-url https://download.pytorch.org/whl/test/xpu
-> 
-> # Intel GPU support is also available through IPEX (Intel® Extension for PyTorch)
-> # IPEX does not require the Intel® Deep Learning Essentials or Intel® oneAPI Base Toolkit
-> # See: https://pytorch-extension.intel.com/installation?request=platform
-> ```
-
-</details>
-
-<details>
-<summary>Apple Silicon</summary>
-
-> ```bash
-> # Install the stable pytorch, e.g.
-> pip install torch torchaudio
-> ```
-
-</details>
-
-### Then you can choose one from below:
-
-> ### 1. As a pip package (if just for inference)
-> 
-> ```bash
-> pip install f5-tts
-> ```
-> 
-> ### 2. Local editable (if also do training, finetuning)
-> 
-> ```bash
-> git clone https://github.com/SWivid/F5-TTS.git
-> cd F5-TTS
-> # git submodule update --init --recursive  # (optional, if use bigvgan as vocoder)
-> pip install -e .
-> ```
-
-### Docker usage also available
-```bash
-# Build from Dockerfile
-docker build -t f5tts:v1 .
-
-# Run from GitHub Container Registry
-docker container run --rm -it --gpus=all --mount 'type=volume,source=f5-tts,target=/root/.cache/huggingface/hub/' -p 7860:7860 ghcr.io/swivid/f5-tts:main
-
-# Quickstart if you want to just run the web interface (not CLI)
-docker container run --rm -it --gpus=all --mount 'type=volume,source=f5-tts,target=/root/.cache/huggingface/hub/' -p 7860:7860 ghcr.io/swivid/f5-tts:main f5-tts_infer-gradio --host 0.0.0.0
-```
-
-### Runtime
-
-Deployment solution with Triton and TensorRT-LLM.
-
-#### Benchmark Results
-Decoding on a single L20 GPU, using 26 different prompt_audio & target_text pairs, 16 NFE.
-
-| Model               | Concurrency    | Avg Latency | RTF    | Mode            |
-|---------------------|----------------|-------------|--------|-----------------|
-| F5-TTS Base (Vocos) | 2              | 253 ms      | 0.0394 | Client-Server   |
-| F5-TTS Base (Vocos) | 1 (Batch_size) | -           | 0.0402 | Offline TRT-LLM |
-| F5-TTS Base (Vocos) | 1 (Batch_size) | -           | 0.1467 | Offline Pytorch |
-
-See [detailed instructions](src/f5_tts/runtime/triton_trtllm/README.md) for more information.
-
-
-## Inference
-
-- In order to achieve desired performance, take a moment to read [detailed guidance](src/f5_tts/infer).
-- By properly searching the keywords of problem encountered, [issues](https://github.com/SWivid/F5-TTS/issues?q=is%3Aissue) are very helpful.
-
-### 1. Gradio App
-
-Currently supported features:
-
-- Basic TTS with Chunk Inference
-- Multi-Style / Multi-Speaker Generation
-- Voice Chat powered by Qwen2.5-3B-Instruct
-- [Custom inference with more language support](src/f5_tts/infer/SHARED.md)
+### 启动
 
 ```bash
-# Launch a Gradio app (web interface)
-f5-tts_infer-gradio
-
-# Specify the port/host
-f5-tts_infer-gradio --port 7860 --host 0.0.0.0
-
-# Launch a share link
-f5-tts_infer-gradio --share
+python src/f5_tts/infer/gradio_mix_demo.py
 ```
 
-<details>
-<summary>NVIDIA device docker compose file example</summary>
+Windows 用户若使用便携环境，可直接双击 `启动特征混合试验台.bat`（内含 CUDA 路径与 HF 镜像配置）。
 
-```yaml
-services:
-  f5-tts:
-    image: ghcr.io/swivid/f5-tts:main
-    ports:
-      - "7860:7860"
-    environment:
-      GRADIO_SERVER_PORT: 7860
-    entrypoint: ["f5-tts_infer-gradio", "--port", "7860", "--host", "0.0.0.0"]
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+界面含两个标签页：**双参考混合** 和 **三参考情绪迁移**。
 
-volumes:
-  f5-tts:
-    driver: local
-```
-
-</details>
-
-### 2. CLI Inference
+### 命令行
 
 ```bash
-# Run with flags
-# Leave --ref_text "" will have ASR model transcribe (extra GPU memory usage)
-f5-tts_infer-cli --model F5TTS_v1_Base \
---ref_audio "provide_prompt_wav_path_here.wav" \
---ref_text "The content, subtitle or transcription of reference audio." \
---gen_text "Some text you want TTS model generate for you."
-
-# Run with default setting. src/f5_tts/infer/examples/basic/basic.toml
-f5-tts_infer-cli
-# Or with your own .toml file
-f5-tts_infer-cli -c custom.toml
-
-# Multi voice. See src/f5_tts/infer/README.md
-f5-tts_infer-cli -c src/f5_tts/infer/examples/multi/story.toml
+f5-tts_infer-cli \
+  --ref_audio "A.wav"   --ref_text   "A的转写" \
+  --ref_audio_2 "B.wav" --ref_text_2 "B的转写" \
+  --gen_text "要合成的文本" \
+  --mix_method slerp --mix_schedule cosine \
+  --mix_a_start 0.9 --mix_a_end 0.3
 ```
 
+不传 `--ref_audio_2` 时退化为标准单参考推理，行为与上游一致。
 
-## Training
+### Python API
 
-### 1. With Hugging Face Accelerate
+```python
+from f5_tts.infer.utils_infer import infer_process
 
-Refer to [training & finetuning guidance](src/f5_tts/train) for best practice.
-
-### 2. With Gradio App
-
-```bash
-# Quick start with Gradio web interface
-f5-tts_finetune-gradio
+wav, sr, _ = infer_process(
+    ref_audio="A.wav", ref_text="A的转写",
+    gen_text="要合成的文本",
+    model_obj=model, vocoder=vocoder,
+    ref_audio_2="B.wav", ref_text_2="B的转写",   # 省略即单参考
+    mix_method="slerp", mix_schedule="cosine",
+    mix_a_start=0.9, mix_a_end=0.3,
+)
 ```
 
-Read [training & finetuning guidance](src/f5_tts/train) for more instructions.
+## 混合参数
 
+### 混合算法 `mix_method`
 
-## [Evaluation](src/f5_tts/eval)
+| 值 | 说明 | 适合 |
+| --- | --- | --- |
+| `lerp` | 线性插值 | 通用，稳妥的起点 |
+| `slerp` | 方向用球面插值 + 幅度用线性插值 | 音色类方向性特征，过渡更平滑 |
+| `log` | 对数域几何平均 | 能量类信号，保持乘性特性 |
 
+### 权重曲线
 
-## Development
+权重 α 表示**参考 A 的占比**（`1-α` 即 B 的占比），沿两个维度独立控制：
 
-Use pre-commit to ensure code quality (will run linters and formatters automatically):
+- **时间维度 t**（扩散步 0→1）：`mix_schedule` + `mix_a_start` / `mix_a_end`
+- **帧位置维度 n**（音频开头→结尾）：`n_schedule` + `n_a_start` / `n_a_end`
 
-```bash
-pip install pre-commit
-pre-commit install
+曲线类型：`linear`（匀速）、`cosine`（中段平缓）、`sigmoid`（两端平缓中段陡），也可传入自定义 callable。
+
+直觉理解：**t 维度**控制"生成过程中何时更像 A"，**n 维度**控制"音频的哪一段更像 A"。
+比如 `n_a_start=1.0, n_a_end=0.0` 意味着开头用 A 的音色、结尾过渡到 B。
+
+### 2D 组合 `mix_2d_mode`
+
+两个维度的权重如何合成：
+
+| 值 | 公式 |
+| --- | --- |
+| `t_only`（默认） | `α = α_t` |
+| `n_only` | `α = α_n` |
+| `multiply` | `α = α_t × α_n` |
+| `add` | `α = (α_t + α_n) / 2` |
+| `max` / `min` | 取较大 / 较小值 |
+| `2d_grid` | 直接传入 `[steps, n_frames]` 权重矩阵 |
+
+`2d_grid` 可配合网页版曲线编辑器（`tools/mix_curve_editor.html` + `tools/mix_curve_server.py`，FastAPI 后端监听 8002）手绘权重网格。
+
+### 权重外推 `allow_extrapolation`
+
+默认权重被 clamp 到 `[0,1]`。开启后允许越界：
+
+- **α > 1** — 放大该参考的特征（超出 A 本身的程度）
+- **α < 0** — 反转特征方向
+
+> 若发现调了参数却"没效果"，先检查是不是没开这个开关被静默 clamp 了。
+
+## 三参考情绪迁移
+
+给定三段音频，构造差分后走双参考路径：
+
+```
+A = 情绪基准（如某人平静时）
+B = 情绪目标（同一人激动时）
+C = 声线基底（目标说话人）
+
+→ C + diff_scale × (B - A)
 ```
 
-When making a pull request, before each commit, run: 
+`diff_scale` 界面范围 0.0–2.0，常用 0.5–1.5。配合负权重 + 开启外推可做情绪反向。
 
-```bash
-pre-commit run --all-files
-```
+## 与上游 F5-TTS 的区别
 
-Note: Some model components have linting exceptions for E722 to accommodate tensor notation.
+| 方面 | 上游 F5-TTS | RefCurve-F5 |
+| --- | --- | --- |
+| 参考音频 | 单段 | 单段或多段，带曲线控制 |
+| 混合时机 | — | ODE 采样循环内部融合 mel 条件 |
+| 情绪迁移 | — | 三参考差分迁移 |
+| 模型加载 | HF 自动下载 | 本地 `ckpts/` 优先 |
+| 中文 ASR | Whisper | FunASR Paraformer（不依赖 FFmpeg） |
+| 界面 | 标准 Gradio | 额外的混合试验台 + 网页曲线编辑器 |
 
+**权重完全兼容**：改造只发生在推理时，不涉及网络结构与训练。上游发布的 checkpoint 可直接使用。
 
-## Acknowledgements
+**上游功能保持可用**：`f5-tts_infer-gradio`、`f5_tts.api.F5TTS`、训练与微调均未受影响。
 
-- [E2-TTS](https://arxiv.org/abs/2406.18009) brilliant work, simple and effective
-- [Emilia](https://arxiv.org/abs/2407.05361), [WenetSpeech4TTS](https://arxiv.org/abs/2406.05763), [LibriTTS](https://arxiv.org/abs/1904.02882), [LJSpeech](https://keithito.com/LJ-Speech-Dataset/) valuable datasets
-- [lucidrains](https://github.com/lucidrains) initial CFM structure with also [bfs18](https://github.com/bfs18) for discussion
-- [SD3](https://arxiv.org/abs/2403.03206) & [Hugging Face diffusers](https://github.com/huggingface/diffusers) DiT and MMDiT code structure
-- [torchdiffeq](https://github.com/rtqichen/torchdiffeq) as ODE solver, [Vocos](https://huggingface.co/charactr/vocos-mel-24khz) and [BigVGAN](https://github.com/NVIDIA/BigVGAN) as vocoder
-- [FunASR](https://github.com/modelscope/FunASR), [faster-whisper](https://github.com/SYSTRAN/faster-whisper), [UniSpeech](https://github.com/microsoft/UniSpeech), [SpeechMOS](https://github.com/tarepan/SpeechMOS) for evaluation tools
-- [ctc-forced-aligner](https://github.com/MahmoudAshraf97/ctc-forced-aligner) for speech edit test
-- [mrfakename](https://x.com/realmrfakename) huggingface space demo ~
-- [f5-tts-mlx](https://github.com/lucasnewman/f5-tts-mlx/tree/main) Implementation with MLX framework by [Lucas Newman](https://github.com/lucasnewman)
-- [F5-TTS-ONNX](https://github.com/DakeQQ/F5-TTS-ONNX) ONNX Runtime version by [DakeQQ](https://github.com/DakeQQ)
-- [Yuekai Zhang](https://github.com/yuekaizhang) Triton and TensorRT-LLM support ~
+当前基线：上游 **v1.1.22**（2026-07）。
 
-## Citation
-If our work and codebase is useful for you, please cite as:
-```
+## 已知限制
+
+- **声码器本地路径硬编码**：`infer_cli.py` 中写死为 `../checkpoints/vocos-mel-24khz`，与实际的 `ckpts/` 不符，且未开放为命令行参数。使用 CLI 时若走本地声码器会失败（此问题继承自上游）。
+- **`--ref_audio_2` 默认值**指向不存在的 `basic_ref_en_2.wav`，不显式传第二参考且不用 toml 时会失败。
+- **`mix_on` 参数**（融合作用于条件 or 预测速度场）仅存在于 `CFM.sample()`，未从上层透传，实际恒为 `cond`。
+- 无自动化测试。
+
+## 路线图
+
+- [x] 双参考混合（lerp / slerp / log）
+- [x] t + n 双维度曲线控制、2D 组合模式、权重外推
+- [x] 三参考情绪迁移
+- [x] 网页版曲线编辑器
+- [ ] **基于反向传播的混合模式** — 当前混合是前向的确定性融合；另一种设计是通过梯度优化求解混合参数，尚未实现
+- [ ] `RefCurve-SoVITS` — 将方法移植到 [GPT-SoVITS](https://github.com/RVC-Boss/GPT-SoVITS)
+
+> RefCurve 的思路不绑定 F5-TTS，原则上可移植到任何以参考音频为条件的 TTS 系统。
+
+## 致谢与许可
+
+本项目基于 [SWivid/F5-TTS](https://github.com/SWivid/F5-TTS)（MIT）改造，感谢原作者的工作。
+
+如果你在研究中使用了 F5-TTS 的底层方法，请引用原论文：
+
+```bibtex
 @article{chen-etal-2024-f5tts,
-      title={F5-TTS: A Fairytaler that Fakes Fluent and Faithful Speech with Flow Matching}, 
-      author={Yushen Chen and Zhikang Niu and Ziyang Ma and Keqi Deng and Chunhui Wang and Jian Zhao and Kai Yu and Xie Chen},
-      journal={arXiv preprint arXiv:2410.06885},
-      year={2024},
+  title={F5-TTS: A Fairytaler that Fakes Fluent and Faithful Speech with Flow Matching},
+  author={Yushen Chen and Zhikang Niu and Ziyang Ma and Keqi Deng and Chunhui Wang
+          and Jian Zhao and Kai Yu and Xie Chen},
+  journal={arXiv preprint arXiv:2410.06885},
+  year={2024},
 }
 ```
-## License
 
-Our code is released under MIT License. The pre-trained models are licensed under the CC-BY-NC license due to the training data Emilia, which is an in-the-wild dataset. Sorry for any inconvenience this may cause.
+本仓库沿用 MIT 许可，见 [LICENSE](LICENSE)。上游原始文档保留于 [README_UPSTREAM.md](README_UPSTREAM.md)。
