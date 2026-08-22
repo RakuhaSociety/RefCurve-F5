@@ -241,7 +241,14 @@ class CFM(nn.Module):
         if isinstance(cond, (tuple, list)):
             assert len(cond) == 2
             cond, cond_b = cond
-        assert cond_b is not None, "need 2nd reference audio/mel (cond_b)"
+        # 未提供第二参考时退化为单参考：cond_b 复用 cond，混合权重恒等于 A，
+        # 结果与上游单参考行为一致。这样 trainer.log_samples / speech_edit /
+        # eval_infer_batch / benchmark 等上游调用点无需改动即可正常工作。
+        single_ref = cond_b is None
+        if single_ref:
+            cond_b = cond
+            if lens_b is None:
+                lens_b = lens
 
         def to_mel(x):
             # x: [b, nw] raw wave or [b, n, d] mel
@@ -317,6 +324,9 @@ class CFM(nn.Module):
         # ---------- 1) 定义随 t 变化的 alpha_t(t) ----------
         def alpha_of_t(t):
             """计算 t 维度的权重，返回标量"""
+            if single_ref:
+                # 单参考模式：权重恒为 1（纯 A），与上游行为一致
+                return torch.ones((), device=device, dtype=cond_a.dtype)
             if callable(mix_schedule):
                 a01 = mix_schedule(t)  # 期望返回 [0,1]
             else:
@@ -336,8 +346,8 @@ class CFM(nn.Module):
         # ---------- 阶段二：定义随 n 变化的 alpha_n(n_ratio) ----------
         def alpha_of_n():
             """计算 n 维度的权重，返回 [1, n, 1]"""
-            if n_a_start is None or n_a_end is None:
-                # 不启用 n 维度，返回全 1（不影响最终权重）
+            if single_ref or n_a_start is None or n_a_end is None:
+                # 单参考模式，或未启用 n 维度：返回全 1（不影响最终权重）
                 return torch.ones_like(n_ratio)
             
             if callable(n_schedule):

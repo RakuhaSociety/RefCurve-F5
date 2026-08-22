@@ -388,10 +388,6 @@ def infer_process(
     gen_text,
     model_obj,
     vocoder,
-    # 改造版：第二参考为关键字可选参数，不传则退化为单参考，
-    # 保持与上游 infer_process(ref_audio, ref_text, gen_text, ...) 的位置参数兼容
-    ref_audio_2=None,
-    ref_text_2="",
     mel_spec_type=mel_spec_type,
     show_info=print,
     progress=tqdm,
@@ -405,6 +401,10 @@ def infer_process(
     device=device,
     allow_extrapolation=False,
     seed=None,
+    # ========== 改造版：第二参考（关键字可选，不传则退化为单参考） ==========
+    # 放在签名末尾，避免挤占上游的位置参数顺序
+    ref_audio_2=None,
+    ref_text_2="",
     # ========== 阶段一 & 阶段二：混合控制参数 ==========
     mix_method="lerp",
     mix_schedule="linear",

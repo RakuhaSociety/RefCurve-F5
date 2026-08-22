@@ -47,7 +47,7 @@ set XFORMERS_FORCE_DISABLE_TRITON=1
 
 `tools/mix_curve_server.py` 是独立的 FastAPI 服务，暴露单个 `POST /infer`（multipart 表单，返回 `audio/wav`）。它复用 `gradio_mix_demo.py` 里的 `_load_default_model()` / `_get_paraformer_asr()` / `_clean_cn_text()`，所以模型加载逻辑只有一份。
 
-配套前端是 [tools/mix_curve_editor.html](tools/mix_curve_editor.html) 和仓库根的 [index.html](index.html)，用于手绘 2D 权重网格再 POST 给后端（对应 `mix_2d_mode="2d_grid"` + `mix_2d_weights` 的 JSON 数组）。
+配套前端是 [tools/mix_curve_editor.html](tools/mix_curve_editor.html)（自包含，无外部脚本，只请求 `localhost:8002`），用于手绘 2D 权重网格再 POST 给后端（对应 `mix_2d_mode="2d_grid"` + `mix_2d_weights` 的 JSON 数组）。
 
 ### CLI 推理
 

@@ -210,9 +210,9 @@ parser.add_argument(
 )
 parser.add_argument(
     "--allow_extrapolation",
-    action="store_true",
-    default=True,
-    help="Allow mix weights to go beyond [0,1] for cond blending",
+    action=argparse.BooleanOptionalAction,
+    default=None,
+    help="Allow mix weights to go beyond [0,1] for cond blending (use --no-allow_extrapolation to disable)",
 )
 
 # ========== 阶段一 & 阶段二：混合控制参数 ==========
@@ -348,7 +348,7 @@ ref_text = (
     if args.ref_text is not None
     else config.get("ref_text", "Some call me nature, others call me mother nature.")
 )
-ref_audio_2 = args.ref_audio_2 or config.get("ref_audio_2", "infer/examples/basic/basic_ref_en_2.wav")
+ref_audio_2 = args.ref_audio_2 or config.get("ref_audio_2", None)
 ref_text_2 = (
     args.ref_text_2
     if args.ref_text_2 is not None
@@ -382,7 +382,11 @@ speed = args.speed or config.get("speed", speed)
 fix_duration = args.fix_duration or config.get("fix_duration", fix_duration)
 device = args.device or config.get("device", device)
 seed = args.seed if args.seed is not None else config.get("seed", None)
-allow_extrapolation = args.allow_extrapolation or config.get("allow_extrapolation", False)
+allow_extrapolation = (
+    args.allow_extrapolation
+    if args.allow_extrapolation is not None
+    else config.get("allow_extrapolation", False)
+)
 
 if seed is not None:
     random.seed(seed)
@@ -397,8 +401,8 @@ if seed is not None:
 if "infer/examples/" in ref_audio:
     ref_audio = _resolve_example_path(ref_audio)
 
-# ✅新增：ref_audio_2 也要补丁
-if "infer/examples/" in ref_audio_2:
+# ✅新增：ref_audio_2 也要补丁（可为 None，表示单参考）
+if ref_audio_2 and "infer/examples/" in ref_audio_2:
     ref_audio_2 = _resolve_example_path(ref_audio_2)
 
 if "infer/examples/" in gen_file:
@@ -503,9 +507,14 @@ def main():
         voices[voice]["ref_audio"], voices[voice]["ref_text"] = preprocess_ref_audio_text(
             voices[voice]["ref_audio"], voices[voice]["ref_text"]
         )
-        voices[voice]["ref_audio_2"], voices[voice]["ref_text_2"] = preprocess_ref_audio_text(
-            voices[voice]["ref_audio_2"], voices[voice]["ref_text_2"]
-        )
+        # 第二参考为可选：多音色 toml（如 examples/multi/story.toml）的各 voice
+        # 通常没有 ref_audio_2，此时该 voice 退化为单参考
+        if voices[voice].get("ref_audio_2"):
+            voices[voice]["ref_audio_2"], voices[voice]["ref_text_2"] = preprocess_ref_audio_text(
+                voices[voice]["ref_audio_2"], voices[voice].get("ref_text_2", "")
+            )
+        else:
+            voices[voice]["ref_audio_2"], voices[voice]["ref_text_2"] = None, ""
         print("ref_audio_", voices[voice]["ref_audio"], "\n\n")
 
     generated_audio_segments = []
