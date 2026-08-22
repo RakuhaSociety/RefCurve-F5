@@ -244,8 +244,8 @@ class CFM(nn.Module):
         mix_a_end=0.9,           # t=1 时 a 的权重（比如从A渐变到B）
         mix_on="cond",           # "cond" 或 "pred"
         mix_method="lerp",       # "lerp" | "slerp" | "log"  阶段一：三种混合算法
-        log_blend_mode="signed_magnitude",  # mix_method="log" 时的子模式，见 log_domain_blend 文档
-        n_normalize_to_ref=False,  # n 维度曲线归一化到参考长度而非 max_duration（实验性）
+        log_blend_mode="logmel",  # mix_method="log" 时的子模式：logmel (数学正确) 或 signed_magnitude (历史遗留)
+        n_normalize_to_ref=True,  # n 维度曲线归一化到参考长度而非 max_duration
         dynamic_disable_cache=True,
         allow_extrapolation=False,
         

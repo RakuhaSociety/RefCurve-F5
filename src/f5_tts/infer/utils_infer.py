@@ -408,8 +408,8 @@ def infer_process(
     # ========== 阶段一 & 阶段二：混合控制参数 ==========
     mix_method="lerp",
     mix_schedule="linear",
-    log_blend_mode="signed_magnitude",
-    n_normalize_to_ref=False,
+    log_blend_mode="logmel",
+    n_normalize_to_ref=True,
     mix_a_start=0.9,
     mix_a_end=0.9,
     mix_2d_mode="t_only",
@@ -513,8 +513,8 @@ def infer_batch_process(
     # ===== 阶段一 & 阶段二：混合控制参数 =====
     mix_method="lerp",
     mix_schedule="linear",
-    log_blend_mode="signed_magnitude",
-    n_normalize_to_ref=False,
+    log_blend_mode="logmel",
+    n_normalize_to_ref=True,
     mix_a_start=0.9,
     mix_a_end=0.9,
     mix_2d_mode="t_only",

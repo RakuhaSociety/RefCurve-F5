@@ -227,13 +227,14 @@ parser.add_argument(
     "--log_blend_mode",
     type=str,
     choices=["signed_magnitude", "logmel"],
-    default="signed_magnitude",
-    help="Log blend sub-mode: signed_magnitude (legacy, overflow-prone) or logmel (mathematically correct for log-mel input)",
+    default="logmel",
+    help="Log blend sub-mode: logmel (mathematically correct for log-mel input, default) or signed_magnitude (legacy, overflow-prone)",
 )
 parser.add_argument(
     "--n_normalize_to_ref",
     action="store_true",
-    help="Normalize n-dimension curve to reference length instead of max_duration (experimental)",
+    default=True,
+    help="Normalize n-dimension curve to reference length instead of max_duration (default: enabled)",
 )
 parser.add_argument(
     "--mix_schedule",
