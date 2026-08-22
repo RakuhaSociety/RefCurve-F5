@@ -471,6 +471,8 @@ def infer_process(
             # ✅阶段一 & 阶段二：混合控制参数
             mix_method=mix_method,
             mix_schedule=mix_schedule,
+            log_blend_mode=log_blend_mode,
+            n_normalize_to_ref=n_normalize_to_ref,
             mix_a_start=mix_a_start,
             mix_a_end=mix_a_end,
             mix_2d_mode=mix_2d_mode,
