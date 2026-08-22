@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Mix Curve Editor</title>
+  <style>
+    body { font-family: sans-serif; margin: 16px; background: #0f172a; color: #e2e8f0; }
+    h1 { margin-bottom: 8px; }
+    .toolbar { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-bottom: 12px; }
+    .panel { border: 1px solid #1e293b; padding: 12px; border-radius: 8px; background: #111827; }
+    .canvas-wrap { position: relative; }
+    canvas { border: 1px solid #334155; background: #0b1224; border-radius: 6px; }
+    label { font-size: 14px; margin-right: 6px; }
+    input[type="number"] { width: 90px; }
+    button { background: #2563eb; color: #e2e8f0; border: none; padding: 8px 12px; border-radius: 6px; cursor: pointer; }
+    button.secondary { background: #475569; }
+    button:active { transform: translateY(1px); }
+    textarea { width: 100%; height: 160px; margin-top: 8px; background: #0b1224; color: #e2e8f0; border: 1px solid #334155; border-radius: 6px; padding: 8px; }
+    .hint { color: #94a3b8; font-size: 13px; }
+    .row { display: flex; flex-wrap: wrap; gap: 12px; }
+    .chip { padding: 4px 8px; border-radius: 12px; border: 1px solid #334155; cursor: pointer; }
+    .chip.active { background: #1e3a8a; border-color: #2563eb; }
+    .preview { font-family: "Consolas", "SFMono-Regular", monospace; font-size: 13px; color: #e5e7eb; margin-top: 6px; }
+  </style>
+</head>
+<body>
+  <h1>Mix Curve Editor (t / n keyframes)</h1>
+  <div class="panel">
+    <div class="toolbar">
+      <div class="row">
+        <span>Curve:</span>
+        <span class="chip" data-curve="t">t (time steps)</span>
+        <span class="chip" data-curve="n">n (mel frames)</span>
+      </div>
+      <label>t samples (steps): <input id="tSamples" type="number" min="2" max="1024" value="32" /></label>
+      <label>n samples (frames): <input id="nSamples" type="number" min="2" max="4096" value="256" /></label>
+      <label><input id="smoothToggle" type="checkbox" checked /> Smooth (Catmull-Rom)</label>
+      <button id="resetBtn" class="secondary">Reset current curve</button>
+    </div>
+    <div class="hint">操作：单击添加关键帧，拖拽移动；Alt+单击删除。纵轴 0~1（下→上），横轴 0~1（左→右）。默认曲线为 y=0.5。</div>
+    <div class="canvas-wrap">
+      <canvas id="canvas" width="960" height="400"></canvas>
+    </div>
+    <div class="preview" id="tPreview">t samples: -</div>
+    <div class="preview" id="nPreview">n samples: -</div>
+  </div>
+
+  <div class="panel" style="margin-top:12px;">
+    <div class="toolbar">
+      <button id="exportBtn">Export JSON</button>
+      <button id="copyBtn" class="secondary">Copy JSON</button>
+      <span class="hint">JSON 包含 t_samples / n_samples，以及 grid_multiply = outer(t, n)</span>
+    </div>
+    <textarea id="output" readonly></textarea>
+  </div>
+
+  <div class="panel" style="margin-top:12px;">
+    <h3>Backend Inference (FastAPI)</h3>
+    <div class="toolbar">
+      <label>Server URL: <input id="serverUrl" type="text" value="http://localhost:8002/infer" style="width:260px;" /></label>
+      <label>mix_method:
+        <select id="mixMethod">
+          <option value="lerp">lerp</option>
+          <option value="slerp">slerp</option>
+          <option value="log">log</option>
+        </select>
+      </label>
+      <label>mix_schedule:
+        <select id="mixSchedule">
+          <option value="linear">linear</option>
+          <option value="cosine">cosine</option>
+          <option value="sigmoid">sigmoid</option>
+        </select>
+      </label>
+      <label>mix_2d_mode:
+        <select id="mix2dMode">
+          <option value="2d_grid">2d_grid</option>
+          <option value="t_only">t_only</option>
+          <option value="n_only">n_only</option>
+          <option value="multiply">multiply</option>
+          <option value="add">add</option>
+          <option value="max">max</option>
+          <option value="min">min</option>
+        </select>
+      </label>
+      <label><input id="allowExtrapolation" type="checkbox" checked /> allow_extrapolation</label>
+    </div>
+    <div class="toolbar">
+      <label>ref A audio: <input id="refA" type="file" accept="audio/*" /></label>
+      <label>ref B audio: <input id="refB" type="file" accept="audio/*" /></label>
+      <label>ref text A: <input id="refTextA" type="text" placeholder="可留空 ASR" style="width:200px;" /></label>
+      <label>ref text B: <input id="refTextB" type="text" placeholder="可留空 ASR" style="width:200px;" /></label>
+      <label>gen text: <input id="genText" type="text" value="让我们一起说中文。" style="width:240px;" /></label>
+      <label>cfg: <input id="cfg" type="number" step="0.1" value="2.0" style="width:80px;" /></label>
+      <label>sway: <input id="sway" type="number" step="0.1" value="-1.0" style="width:80px;" /></label>
+      <label>speed: <input id="speed" type="number" step="0.05" value="1.0" style="width:80px;" /></label>
+      <label>seed: <input id="seed" type="number" step="1" value="" style="width:80px;" placeholder="可空" /></label>
+    </div>
+    <div class="toolbar">
+      <button id="runBtn">Run Inference</button>
+      <span id="status" class="hint"></span>
+    </div>
+    <audio id="player" controls style="width:100%; margin-top:8px;"></audio>
+  </div>
+
+  <script>
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const chips = [...document.querySelectorAll('.chip')];
+    const tSamplesInput = document.getElementById('tSamples');
+    const nSamplesInput = document.getElementById('nSamples');
+    const smoothToggle = document.getElementById('smoothToggle');
+    const resetBtn = document.getElementById('resetBtn');
+    const exportBtn = document.getElementById('exportBtn');
+    const copyBtn = document.getElementById('copyBtn');
+    const output = document.getElementById('output');
+
+    // backend controls
+    const serverUrl = document.getElementById('serverUrl');
+    const refAInput = document.getElementById('refA');
+    const refBInput = document.getElementById('refB');
+    const refTextAInput = document.getElementById('refTextA');
+    const refTextBInput = document.getElementById('refTextB');
+    const genTextInput = document.getElementById('genText');
+    const cfgInput = document.getElementById('cfg');
+    const swayInput = document.getElementById('sway');
+    const speedInput = document.getElementById('speed');
+    const seedInput = document.getElementById('seed');
+    const mixMethod = document.getElementById('mixMethod');
+    const mixSchedule = document.getElementById('mixSchedule');
+    const mix2dMode = document.getElementById('mix2dMode');
+    const allowExtrapolation = document.getElementById('allowExtrapolation');
+    const runBtn = document.getElementById('runBtn');
+    const statusSpan = document.getElementById('status');
+    const player = document.getElementById('player');
+    const tPreview = document.getElementById('tPreview');
+    const nPreview = document.getElementById('nPreview');
+
+    const state = {
+      activeCurve: 't',
+      curves: {
+        t: [ {x:0, y:0.5}, {x:1, y:0.5} ],
+        n: [ {x:0, y:0.5}, {x:1, y:0.5} ],
+      },
+      dragging: null,
+    };
+
+    chips.forEach(chip => {
+      chip.addEventListener('click', () => {
+        state.activeCurve = chip.dataset.curve;
+        chips.forEach(c => c.classList.toggle('active', c === chip));
+        draw();
+      });
+    });
+    chips[0].classList.add('active');
+
+    function toCanvas(pt){
+      return { x: pt.x * canvas.width, y: (1 - pt.y) * canvas.height };
+    }
+    function fromCanvas(pt){
+      return { x: clamp(pt.x / canvas.width, 0, 1), y: clamp(1 - pt.y / canvas.height, 0, 1) };
+    }
+    function clamp(v,min,max){ return Math.max(min, Math.min(max, v)); }
+
+    function drawGrid(){
+      ctx.strokeStyle = '#1f2937';
+      ctx.lineWidth = 1;
+      ctx.font = '11px monospace';
+      ctx.fillStyle = '#64748b';
+      for(let i=0;i<=10;i++){
+        const x = (i/10)*canvas.width;
+        const y = (i/10)*canvas.height;
+        ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,canvas.height); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(canvas.width,y); ctx.stroke();
+        const label = (i/10).toFixed(1);
+        ctx.fillText(label, x+4, canvas.height-6);   // x-axis labels
+        ctx.fillText(label, 4, y-4);                 // y-axis labels
+      }
+    }
+
+    function drawCurve(){
+      const pts = state.curves[state.activeCurve];
+      if(pts.length === 0) return;
+      ctx.strokeStyle = '#38bdf8';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      const smooth = smoothToggle.checked;
+      if(!smooth || pts.length < 3){
+        pts.forEach((p,i)=>{
+          const c = toCanvas(p);
+          if(i===0) ctx.moveTo(c.x,c.y); else ctx.lineTo(c.x,c.y);
+        });
+      } else {
+        // Catmull-Rom interpolation
+        const cps = [pts[0], ...pts, pts[pts.length-1]]; // pad
+        const steps = 24;
+        for(let i=0;i<cps.length-3;i++){
+          for(let t=0;t<=1;t+=1/steps){
+            const p = catmull(cps[i], cps[i+1], cps[i+2], cps[i+3], t);
+            const c = toCanvas(p);
+            if(i===0 && t===0) ctx.moveTo(c.x,c.y); else ctx.lineTo(c.x,c.y);
+          }
+        }
+      }
+      ctx.stroke();
+
+      // points
+      pts.forEach(p=>{
+        const c = toCanvas(p);
+        ctx.fillStyle = '#fbbf24';
+        ctx.beginPath();
+        ctx.arc(c.x, c.y, 6, 0, Math.PI*2);
+        ctx.fill();
+        ctx.strokeStyle = '#0f172a';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      });
+    }
+
+    function catmull(p0,p1,p2,p3,t){
+      const t2 = t*t, t3 = t2*t;
+      const x = 0.5*((2*p1.x)+(-p0.x+p2.x)*t+(2*p0.x-5*p1.x+4*p2.x-p3.x)*t2+(-p0.x+3*p1.x-3*p2.x+p3.x)*t3);
+      const y = 0.5*((2*p1.y)+(-p0.y+p2.y)*t+(2*p0.y-5*p1.y+4*p2.y-p3.y)*t2+(-p0.y+3*p1.y-3*p2.y+p3.y)*t3);
+      return {x: clamp(x,0,1), y: clamp(y,0,1)};
+    }
+
+    function nearestPoint(pt){
+      const pts = state.curves[state.activeCurve];
+      let best = null, dist = 1e9;
+      pts.forEach((p,i)=>{
+        const c = toCanvas(p);
+        const d = Math.hypot(c.x-pt.x, c.y-pt.y);
+        if(d < dist){ dist = d; best = i; }
+      });
+      return {idx: best, dist};
+    }
+
+    canvas.addEventListener('mousedown', (e)=>{
+      const rect = canvas.getBoundingClientRect();
+      const pos = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+      const {idx, dist} = nearestPoint(pos);
+      const pts = state.curves[state.activeCurve];
+      const threshold = 10;
+      if(e.altKey){
+        if(idx !== null && dist < threshold && pts.length > 2){
+          pts.splice(idx,1);
+          draw();
+        }
+        return;
+      }
+      if(idx !== null && dist < threshold){
+        state.dragging = idx;
+      } else {
+        const p = fromCanvas(pos);
+        // insert in sorted order by x
+        let insertAt = pts.findIndex(k => k.x > p.x);
+        if(insertAt === -1) insertAt = pts.length;
+        pts.splice(insertAt,0,p);
+        state.dragging = insertAt;
+        draw();
+      }
+    });
+    canvas.addEventListener('mousemove',(e)=>{
+      if(state.dragging === null) return;
+      const rect = canvas.getBoundingClientRect();
+      const pos = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+      const p = fromCanvas(pos);
+      const pts = state.curves[state.activeCurve];
+      // keep x ordering
+      const idx = state.dragging;
+      const left = idx>0 ? pts[idx-1].x + 0.0005 : 0;
+      const right = idx<pts.length-1 ? pts[idx+1].x - 0.0005 : 1;
+      pts[idx] = { x: clamp(p.x,left,right), y: p.y };
+      draw();
+    });
+    window.addEventListener('mouseup', ()=>{ state.dragging = null; });
+
+    resetBtn.addEventListener('click', ()=>{
+      state.curves[state.activeCurve] = [ {x:0,y:0.5}, {x:1,y:0.5} ];
+      draw();
+    });
+
+    function sampleCurve(curve, count){
+      const smooth = smoothToggle.checked;
+      if(curve.length === 1) return Array(count).fill(curve[0].y);
+      const xs = curve.map(p=>p.x);
+      const ys = curve.map(p=>p.y);
+      const pts = curve;
+      const result = [];
+      for(let i=0;i<count;i++){
+        const t = i/(count-1);
+        if(!smooth || pts.length < 3){
+          // piecewise linear
+          let j = pts.findIndex(p=>p.x >= t);
+          if(j === -1) j = pts.length-1;
+          if(j === 0){ result.push(pts[0].y); continue; }
+          const p0 = pts[j-1], p1 = pts[j];
+          const u = (t - p0.x)/(p1.x - p0.x + 1e-9);
+          result.push(p0.y*(1-u) + p1.y*u);
+        } else {
+          // Catmull on pre-resampled points
+          const dense = [];
+          const cps = [pts[0], ...pts, pts[pts.length-1]];
+          const steps = 128;
+          for(let k=0;k<cps.length-3;k++){
+            for(let tt=0; tt<=1; tt+=1/steps){
+              dense.push(catmull(cps[k], cps[k+1], cps[k+2], cps[k+3], tt));
+            }
+          }
+          // find nearest in dense based on x
+          let j = dense.findIndex(p=>p.x >= t);
+          if(j === -1) j = dense.length-1;
+          if(j === 0){ result.push(dense[0].y); continue; }
+          const p0 = dense[j-1], p1 = dense[j];
+          const u = (t - p0.x)/(p1.x - p0.x + 1e-9);
+          result.push(p0.y*(1-u) + p1.y*u);
+        }
+      }
+      return result;
+    }
+
+    function outer(a,b){
+      const out = [];
+      for(let i=0;i<a.length;i++){
+        const row = [];
+        for(let j=0;j<b.length;j++) row.push(a[i]*b[j]);
+        out.push(row);
+      }
+      return out;
+    }
+
+    function exportJSON(){
+      const tCount = parseInt(tSamplesInput.value,10) || 32;
+      const nCount = parseInt(nSamplesInput.value,10) || 256;
+      const tSamples = sampleCurve(state.curves.t, tCount);
+      const nSamples = sampleCurve(state.curves.n, nCount);
+      const data = {
+        meta: {
+          smooth: smoothToggle.checked,
+          t_count: tCount,
+          n_count: nCount,
+        },
+        curves: {
+          t: state.curves.t,
+          n: state.curves.n,
+        },
+        samples: {
+          t: tSamples,
+          n: nSamples,
+          grid_multiply: outer(tSamples, nSamples),
+        }
+      };
+      const text = JSON.stringify(data, null, 2);
+      output.value = text;
+      return text;
+    }
+
+    function updatePreview(){
+      // sample 11 points (0.0~1.0 step 0.1) for quick view
+      const tPrev = sampleCurve(state.curves.t, 11);
+      const nPrev = sampleCurve(state.curves.n, 11);
+      const fmt = arr => arr.map(v=>v.toFixed(2)).join(', ');
+      tPreview.textContent = 't samples (11 pts): ' + fmt(tPrev);
+      nPreview.textContent = 'n samples (11 pts): ' + fmt(nPrev);
+    }
+
+    exportBtn.addEventListener('click', ()=>{
+      const text = exportJSON();
+      const blob = new Blob([text], {type: 'application/json'});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = 'mix_curves.json';
+      a.click();
+      URL.revokeObjectURL(url);
+    });
+
+    copyBtn.addEventListener('click', async ()=>{
+      const text = exportJSON();
+      try {
+        await navigator.clipboard.writeText(text);
+        copyBtn.textContent = 'Copied!';
+        setTimeout(()=> copyBtn.textContent='Copy JSON', 1200);
+      } catch (e) {
+        copyBtn.textContent = 'Copy failed';
+        setTimeout(()=> copyBtn.textContent='Copy JSON', 1200);
+      }
+    });
+
+    async function runInference(){
+      if(!refAInput.files.length || !refBInput.files.length){
+        statusSpan.textContent = '请先选择参考音频 A/B';
+        return;
+      }
+      statusSpan.textContent = 'Exporting curves...';
+      const json = JSON.parse(exportJSON());
+      const grid = json.samples.grid_multiply;
+      const tArr = json.samples.t;
+      const nArr = json.samples.n;
+      const steps = tArr.length;
+
+      const combine = (a, b, mode) => {
+        switch(mode){
+          case 't_only': return a;
+          case 'n_only': return b;
+          case 'multiply': return a * b;
+          case 'add': return (a + b) / 2;
+          case 'max': return Math.max(a, b);
+          case 'min': return Math.min(a, b);
+          case '2d_grid': return null; // handled separately
+          default: return a;
+        }
+      };
+
+      let mixStart, mixEnd;
+      if(mix2dMode.value === '2d_grid' && Array.isArray(grid) && grid.length > 0 && grid[0].length > 0){
+        mixStart = grid[0][0];
+        mixEnd = grid[grid.length-1][grid[0].length-1];
+      } else {
+        const a0 = tArr[0] ?? 0.5;
+        const a1 = tArr[tArr.length-1] ?? 0.5;
+        const b0 = nArr[0] ?? 0.5;
+        const b1 = nArr[nArr.length-1] ?? 0.5;
+        mixStart = combine(a0, b0, mix2dMode.value);
+        mixEnd = combine(a1, b1, mix2dMode.value);
+      }
+
+      const fd = new FormData();
+      fd.append('ref_a', refAInput.files[0]);
+      fd.append('ref_b', refBInput.files[0]);
+      fd.append('gen_text', genTextInput.value || '让我们一起说中文。');
+      fd.append('ref_text_a', refTextAInput.value || '');
+      fd.append('ref_text_b', refTextBInput.value || '');
+      fd.append('steps', steps.toString());
+      fd.append('cfg', cfgInput.value || '2.0');
+      fd.append('sway_coef', swayInput.value || '-1.0');
+      fd.append('speed', speedInput.value || '1.0');
+      if(seedInput.value) fd.append('seed', seedInput.value);
+      fd.append('mix_method', mixMethod.value);
+      fd.append('mix_schedule', mixSchedule.value);
+      fd.append('mix_a_start', mixStart.toString());
+      fd.append('mix_a_end', mixEnd.toString());
+      fd.append('mix_2d_mode', mix2dMode.value);
+      fd.append('allow_extrapolation', allowExtrapolation.checked ? 'true' : 'false');
+      fd.append('mix_2d_weights', JSON.stringify(grid));
+      fd.append('use_asr', 'true');
+
+      statusSpan.textContent = 'Running...';
+      try {
+        const resp = await fetch(serverUrl.value || 'http://localhost:8002/infer', {
+          method: 'POST',
+          body: fd,
+        });
+        if(!resp.ok){
+          const txt = await resp.text();
+          throw new Error(txt || 'HTTP error');
+        }
+        const blob = await resp.blob();
+        const url = URL.createObjectURL(blob);
+        player.src = url;
+        player.play();
+        statusSpan.textContent = 'Done.';
+      } catch(err){
+        console.error(err);
+        statusSpan.textContent = 'Error: ' + err.message;
+      }
+    }
+
+    runBtn.addEventListener('click', runInference);
+
+    function draw(){
+      ctx.clearRect(0,0,canvas.width, canvas.height);
+      drawGrid();
+      drawCurve();
+      updatePreview();
+    }
+    draw();
+  </script>
+</body>
+</html>
