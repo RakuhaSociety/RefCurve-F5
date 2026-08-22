@@ -7,6 +7,11 @@ ckpts/
 wandb/
 results/
 
+# 改造版：本地便携环境与大文件，不入库
+f5-tts_env/
+.huggingface/
+*.whl
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
