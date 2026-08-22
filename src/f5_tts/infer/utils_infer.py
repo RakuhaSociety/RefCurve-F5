@@ -25,7 +25,6 @@ import torchaudio
 import tqdm
 from huggingface_hub import hf_hub_download
 from pydub import AudioSegment, silence
-from transformers import pipeline
 from vocos import Vocos
 
 from f5_tts.model import CFM
@@ -149,6 +148,8 @@ asr_pipe = None
 
 
 def initialize_asr_pipeline(device: str = device, dtype=None):
+    from transformers import pipeline
+
     if dtype is None:
         dtype = (
             torch.float16
@@ -382,6 +383,8 @@ def preprocess_ref_audio_text(ref_audio_orig, ref_text, show_info=print):
 def infer_process(
     ref_audio,
     ref_text,
+    ref_audio_2,
+    ref_text_2,
     gen_text,
     model_obj,
     vocoder,
@@ -396,10 +399,29 @@ def infer_process(
     speed=speed,
     fix_duration=fix_duration,
     device=device,
+    allow_extrapolation=False,
+    seed=None,
+    # ========== 阶段一 & 阶段二：混合控制参数 ==========
+    mix_method="lerp",
+    mix_schedule="linear",
+    mix_a_start=0.9,
+    mix_a_end=0.9,
+    mix_2d_mode="t_only",
+    mix_2d_weights=None,
+    n_schedule=None,
+    n_a_start=None,
+    n_a_end=None,
 ):
     # Split the input text into batches
-    audio, sr = torchaudio.load(ref_audio)
-    max_chars = int(len(ref_text.encode("utf-8")) / (audio.shape[-1] / sr) * (22 - audio.shape[-1] / sr) * speed)
+    audio_a, sr_a = torchaudio.load(ref_audio)
+    audio_b, sr_b = torchaudio.load(ref_audio_2)
+
+    ref_secs = max(audio_a.shape[-1] / sr_a, audio_b.shape[-1] / sr_b)
+    ref_chars = max(len(ref_text.encode("utf-8")) , len(ref_text_2.encode("utf-8")))
+
+    max_chars = int(ref_chars / ref_secs * (22 - ref_secs) * speed)
+
+    
     gen_text_batches = chunk_text(gen_text, max_chars=max_chars)
     for i, gen_text in enumerate(gen_text_batches):
         print(f"gen_text {i}", gen_text)
@@ -408,7 +430,7 @@ def infer_process(
     show_info(f"Generating audio in {len(gen_text_batches)} batches...")
     return next(
         infer_batch_process(
-            (audio, sr),
+            (audio_a, sr_a),
             ref_text,
             gen_text_batches,
             model_obj,
@@ -423,6 +445,23 @@ def infer_process(
             speed=speed,
             fix_duration=fix_duration,
             device=device,
+            allow_extrapolation=allow_extrapolation,
+            seed=seed,
+            
+            # ✅新增：第二参考传下去
+            ref_audio_2=(audio_b, sr_b),
+            ref_text_2=ref_text_2,
+            
+            # ✅阶段一 & 阶段二：混合控制参数
+            mix_method=mix_method,
+            mix_schedule=mix_schedule,
+            mix_a_start=mix_a_start,
+            mix_a_end=mix_a_end,
+            mix_2d_mode=mix_2d_mode,
+            mix_2d_weights=mix_2d_weights,
+            n_schedule=n_schedule,
+            n_a_start=n_a_start,
+            n_a_end=n_a_end,
         )
     )
 
@@ -448,64 +487,157 @@ def infer_batch_process(
     device=None,
     streaming=False,
     chunk_size=2048,
+    allow_extrapolation=False,
+    seed=None,
+    # ===== 新增：第二参考 =====
+    ref_audio_2=None,   # (audio2, sr2)；不传则退化为单参考
+    ref_text_2="",
+    # ===== 阶段一 & 阶段二：混合控制参数 =====
+    mix_method="lerp",
+    mix_schedule="linear",
+    mix_a_start=0.9,
+    mix_a_end=0.9,
+    mix_2d_mode="t_only",
+    mix_2d_weights=None,
+    n_schedule=None,
+    n_a_start=None,
+    n_a_end=None,
 ):
-    audio, sr = ref_audio
-    if audio.shape[0] > 1:
-        audio = torch.mean(audio, dim=0, keepdim=True)
+    # ----------------------------
+    # 0) unpack & prepare 2 audios
+    # ----------------------------
+    audio_a, sr_a = ref_audio
 
-    rms = torch.sqrt(torch.mean(torch.square(audio)))
-    if rms < target_rms:
-        audio = audio * target_rms / rms
-    if sr != target_sample_rate:
-        resampler = torchaudio.transforms.Resample(sr, target_sample_rate)
-        audio = resampler(audio)
-    audio = audio.to(device)
+    if ref_audio_2 is None:
+        audio_b, sr_b = audio_a.clone(), sr_a
+    else:
+        audio_b, sr_b = ref_audio_2
+
+    def _prep_audio(audio, sr):
+        # mono
+        if audio.shape[0] > 1:
+            audio = torch.mean(audio, dim=0, keepdim=True)
+
+        # rms normalize (keep original rms for restoring output loudness)
+        rms = torch.sqrt(torch.mean(torch.square(audio)))
+        if rms < target_rms:
+            audio = audio * target_rms / rms
+
+        # resample
+        if sr != target_sample_rate:
+            resampler = torchaudio.transforms.Resample(sr, target_sample_rate)
+            audio = resampler(audio)
+
+        audio = audio.to(device)
+        return audio, rms
+
+    audio_a, rms_a = _prep_audio(audio_a, sr_a)
+    audio_b, rms_b = _prep_audio(audio_b, sr_b)
+
+    # ----------------------------
+    # 1) merge ref texts -> prompt_text
+    # ----------------------------
+    def _ensure_end_punc(t: str) -> str:
+        t = (t or "").strip()
+        if not t:
+            return ""
+        if not t.endswith(". ") and not t.endswith("。"):
+            if t.endswith("."):
+                t += " "
+            else:
+                t += ". "
+        return t
+
+    ref_text = _ensure_end_punc(ref_text)
+    ref_text_2 = _ensure_end_punc(ref_text_2)
+
+    # 根据 mix_a_start 权重决定用哪个文本作为 prompt
+    # 这样交换 A/B 并交换权重时，选中的文本也会相应切换，保持对称
+    if mix_a_start >= 0.5:
+        prompt_text = ref_text.strip()  # A 权重更大，用 A 的文本
+    else:
+        prompt_text = ref_text_2.strip()  # B 权重更大，用 B 的文本
+
+    # 和原版一致：如果最后一个字符是 ascii（len==1），补个空格
+    if prompt_text and len(prompt_text[-1].encode("utf-8")) == 1:
+        prompt_text = prompt_text + " "
 
     generated_waves = []
     spectrograms = []
 
-    if len(ref_text[-1].encode("utf-8")) == 1:
-        ref_text = ref_text + " "
-
+    # ----------------------------
+    # 2) per-batch inference
+    # ----------------------------
     def process_batch(gen_text):
         local_speed = speed
         if len(gen_text.encode("utf-8")) < 10:
             local_speed = 0.3
 
-        # Prepare the text
-        text_list = [ref_text + gen_text]
+        # Prepare text
+        if prompt_text:
+            text_list = [prompt_text + gen_text]
+        else:
+            text_list = [gen_text]
         final_text_list = convert_char_to_pinyin(text_list)
 
-        ref_audio_len = audio.shape[-1] // hop_length
+        # union prompt length (frames) so we cut correctly
+        ref_len_a = audio_a.shape[-1] // hop_length
+        ref_len_b = audio_b.shape[-1] // hop_length
+        ref_audio_len = max(ref_len_a, ref_len_b)
+
         if fix_duration is not None:
             duration = int(fix_duration * target_sample_rate / hop_length)
         else:
-            # Calculate duration
-            ref_text_len = len(ref_text.encode("utf-8"))
+            # duration estimation uses the longer of the two reference texts to avoid underestimating
+            ref_text_len = max(1, len(ref_text.encode("utf-8")), len(ref_text_2.encode("utf-8")))
             gen_text_len = len(gen_text.encode("utf-8"))
             duration = ref_audio_len + int(ref_audio_len / ref_text_len * gen_text_len / local_speed)
 
-        # inference
         with torch.inference_mode():
+            local_mix_2d = mix_2d_weights
+            # allow list/np input for 2d weights
+            if local_mix_2d is not None and not torch.is_tensor(local_mix_2d):
+                local_mix_2d = torch.tensor(local_mix_2d, device=audio_a.device, dtype=audio_a.dtype)
+
             generated, _ = model_obj.sample(
-                cond=audio,
+                cond=audio_a,
+                cond_b=audio_b,  # ✅第二参考音频
                 text=final_text_list,
                 duration=duration,
                 steps=nfe_step,
                 cfg_strength=cfg_strength,
                 sway_sampling_coef=sway_sampling_coef,
+                seed=seed,
+                allow_extrapolation=allow_extrapolation,
+                # ✅阶段一 & 阶段二：混合控制参数
+                mix_method=mix_method,
+                mix_schedule=mix_schedule,
+                mix_a_start=mix_a_start,
+                mix_a_end=mix_a_end,
+                mix_2d_mode=mix_2d_mode,
+                mix_2d_weights=local_mix_2d,
+                n_schedule=n_schedule,
+                n_a_start=n_a_start,
+                n_a_end=n_a_end,
             )
             del _
 
-            generated = generated.to(torch.float32)  # generated mel spectrogram
-            generated = generated[:, ref_audio_len:, :]
-            generated = generated.permute(0, 2, 1)
+            generated = generated.to(torch.float32)   # mel: [1, T, C]
+            generated = generated[:, ref_audio_len:, :]  # ✅切掉 union prompt
+            generated = generated.permute(0, 2, 1)    # -> [1, C, T] for vocoder
+
             if mel_spec_type == "vocos":
                 generated_wave = vocoder.decode(generated)
             elif mel_spec_type == "bigvgan":
                 generated_wave = vocoder(generated)
-            if rms < target_rms:
-                generated_wave = generated_wave * rms / target_rms
+            else:
+                raise ValueError(f"Unknown mel_spec_type: {mel_spec_type}")
+
+            # restore loudness based on weighted RMS of both refs
+            # 使用 mix_a_start 作为权重，使响度恢复更对称
+            weighted_rms = mix_a_start * rms_a + (1 - mix_a_start) * rms_b
+            if weighted_rms < target_rms:
+                generated_wave = generated_wave * weighted_rms / target_rms
 
             # wav -> numpy
             generated_wave = generated_wave.squeeze().cpu().numpy()
@@ -518,6 +650,9 @@ def infer_batch_process(
                 del generated
                 yield generated_wave, generated_cpu
 
+    # ----------------------------
+    # 3) output aggregation (same as original)
+    # ----------------------------
     if streaming:
         for gen_text in progress.tqdm(gen_text_batches) if progress is not None else gen_text_batches:
             for chunk in process_batch(gen_text):
@@ -567,14 +702,12 @@ def infer_batch_process(
                     new_wave = np.concatenate(
                         [prev_wave[:-cross_fade_samples], cross_faded_overlap, next_wave[cross_fade_samples:]]
                     )
-
                     final_wave = new_wave
 
             # Create a combined spectrogram
             combined_spectrogram = np.concatenate(spectrograms, axis=1)
 
             yield final_wave, target_sample_rate, combined_spectrogram
-
         else:
             yield None, target_sample_rate, None
 

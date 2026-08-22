@@ -1,18 +1,27 @@
 import argparse
 import codecs
 import os
+import random
 import re
+import sys
 from datetime import datetime
 from importlib.resources import files
 from pathlib import Path
 
 import numpy as np
+import torch
 import soundfile as sf
 import tomli
 from cached_path import cached_path
 from hydra.utils import get_class
 from omegaconf import OmegaConf
 from unidecode import unidecode
+
+# Prefer local source over installed package when running directly
+CURRENT_DIR = Path(__file__).resolve()
+REPO_SRC = CURRENT_DIR.parents[2]
+if str(REPO_SRC) not in sys.path:
+    sys.path.insert(0, str(REPO_SRC))
 
 from f5_tts.infer.utils_infer import (
     cfg_strength,
@@ -81,6 +90,18 @@ parser.add_argument(
 parser.add_argument(
     "-s",
     "--ref_text",
+    type=str,
+    help="The transcript/subtitle for the reference audio",
+)
+parser.add_argument(
+    "-r2",
+    "--ref_audio_2",
+    type=str,
+    help="The reference audio file.",
+)
+parser.add_argument(
+    "-s2",
+    "--ref_text_2",
     type=str,
     help="The transcript/subtitle for the reference audio",
 )
@@ -172,14 +193,119 @@ parser.add_argument(
 parser.add_argument(
     "--device",
     type=str,
+    default="cuda" if torch.cuda.is_available() else "cpu",
     help="Specify the device to run on",
 )
+parser.add_argument(
+    "--seed",
+    type=int,
+    default=1234,
+    help="Random seed for reproducible inference",
+)
+parser.add_argument(
+    "--allow_extrapolation",
+    action="store_true",
+    default=True,
+    help="Allow mix weights to go beyond [0,1] for cond blending",
+)
+
+# ========== 阶段一 & 阶段二：混合控制参数 ==========
+parser.add_argument(
+    "--mix_method",
+    type=str,
+    choices=["lerp", "slerp", "log"],
+    default="slerp",
+    help="Mixing method: lerp (linear), slerp (spherical), log (geometric mean)",
+)
+parser.add_argument(
+    "--mix_schedule",
+    type=str,
+    choices=["linear", "cosine", "sigmoid"],
+    default="linear",
+    help="Schedule for t-dimension mixing weight curve",
+)
+parser.add_argument(
+    "--mix_a_start",
+    type=float,
+    default=0.5,
+    help="Weight of ref_a at t=0 (denoising start)",
+)
+parser.add_argument(
+    "--mix_a_end",
+    type=float,
+    default=0.5,
+    help="Weight of ref_a at t=1 (denoising end)",
+)
+parser.add_argument(
+    "--mix_2d_mode",
+    type=str,
+    choices=["t_only", "n_only", "multiply", "add", "max", "min"],
+    default="t_only",
+    help="How to combine t-dimension and n-dimension weights",
+)
+parser.add_argument(
+    "--n_schedule",
+    type=str,
+    choices=["linear", "cosine", "sigmoid"],
+    default="linear",
+    help="Schedule for n-dimension (mel frame position) mixing weight curve",
+)
+parser.add_argument(
+    "--n_a_start",
+    type=float,
+    default=0.5,
+    help="Weight of ref_a at n=0 (audio start), None to disable n-dimension",
+)
+parser.add_argument(
+    "--n_a_end",
+    type=float,
+    default=0.5,
+    help="Weight of ref_a at n=1 (audio end)",
+)
+
 args = parser.parse_args()
 
 
 # config file
 
 config = tomli.load(open(args.config, "rb"))
+
+
+def _get_ckpt_cache_dir() -> Path:
+    """Prefer caching under repo ckpts to avoid default C: user cache."""
+    env_dir = os.getenv("F5TTS_CKPT_CACHE")
+    if env_dir:
+        return Path(env_dir)
+
+    script_path = Path(__file__).resolve()
+    for parent in script_path.parents:
+        candidate = parent / "ckpts"
+        if candidate.exists():
+            return candidate
+
+    return script_path.parent / "ckpts"
+
+
+def _resolve_example_path(path_str: str) -> str:
+    """Resolve example assets preferring repo files over installed package."""
+    p = Path(path_str)
+    if p.is_absolute():
+        return str(p)
+
+    script_path = Path(__file__).resolve()
+    for parent in script_path.parents:
+        candidate = parent / path_str
+        if candidate.exists():
+            return str(candidate)
+
+    try:
+        pkg_path = files("f5_tts").joinpath(path_str)
+        if pkg_path.is_file():
+            return str(pkg_path)
+    except Exception:
+        pass
+
+    return path_str
 
 
 # command-line interface parameters
@@ -193,6 +319,12 @@ ref_text = (
     args.ref_text
     if args.ref_text is not None
     else config.get("ref_text", "Some call me nature, others call me mother nature.")
+)
+ref_audio_2 = args.ref_audio_2 or config.get("ref_audio_2", "infer/examples/basic/basic_ref_en_2.wav")
+ref_text_2 = (
+    args.ref_text_2
+    if args.ref_text_2 is not None
+    else config.get("ref_text_2", "Some call me nature, others call me mother nature.")
 )
 gen_text = args.gen_text or config.get("gen_text", "让我们一起说中文。")
 gen_file = args.gen_file or config.get("gen_file", "")
@@ -221,19 +353,37 @@ sway_sampling_coef = args.sway_sampling_coef or config.get("sway_sampling_coef",
 speed = args.speed or config.get("speed", speed)
 fix_duration = args.fix_duration or config.get("fix_duration", fix_duration)
 device = args.device or config.get("device", device)
+seed = args.seed if args.seed is not None else config.get("seed", None)
+allow_extrapolation = args.allow_extrapolation or config.get("allow_extrapolation", False)
+
+if seed is not None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 # patches for pip pkg user
+# patches for pip pkg user
 if "infer/examples/" in ref_audio:
-    ref_audio = str(files("f5_tts").joinpath(f"{ref_audio}"))
+    ref_audio = _resolve_example_path(ref_audio)
+
+# ✅新增：ref_audio_2 也要补丁
+if "infer/examples/" in ref_audio_2:
+    ref_audio_2 = _resolve_example_path(ref_audio_2)
+
 if "infer/examples/" in gen_file:
-    gen_file = str(files("f5_tts").joinpath(f"{gen_file}"))
+    gen_file = _resolve_example_path(gen_file)
+
+# ✅voices 里同时补 ref_audio / ref_audio_2
 if "voices" in config:
     for voice in config["voices"]:
-        voice_ref_audio = config["voices"][voice]["ref_audio"]
-        if "infer/examples/" in voice_ref_audio:
-            config["voices"][voice]["ref_audio"] = str(files("f5_tts").joinpath(f"{voice_ref_audio}"))
-
+        for k in ("ref_audio", "ref_audio_2"):
+            if k in config["voices"][voice]:
+                p = config["voices"][voice][k]
+                if isinstance(p, str) and "infer/examples/" in p:
+                    config["voices"][voice][k] = _resolve_example_path(p)
 
 # ignore gen_text if gen_file provided
 
@@ -288,7 +438,14 @@ elif model == "E2TTS_Base":
     ckpt_step = 1200000
 
 if not ckpt_file:
-    ckpt_file = str(cached_path(f"hf://SWivid/{repo_name}/{model}/model_{ckpt_step}.{ckpt_type}"))
+    ckpt_cache_dir = _get_ckpt_cache_dir()
+    ckpt_cache_dir.mkdir(parents=True, exist_ok=True)
+    ckpt_file = str(
+        cached_path(
+            f"hf://SWivid/{repo_name}/{model}/model_{ckpt_step}.{ckpt_type}",
+            cache_dir=ckpt_cache_dir,
+        )
+    )
 
 print(f"Using {model}...")
 ema_model = load_model(
@@ -300,7 +457,7 @@ ema_model = load_model(
 
 
 def main():
-    main_voice = {"ref_audio": ref_audio, "ref_text": ref_text}
+    main_voice = {"ref_audio": ref_audio, "ref_text": ref_text, "ref_audio_2": ref_audio_2, "ref_text_2": ref_text_2}
     if "voices" not in config:
         voices = {"main": main_voice}
     else:
@@ -311,6 +468,9 @@ def main():
         print("ref_audio ", voices[voice]["ref_audio"])
         voices[voice]["ref_audio"], voices[voice]["ref_text"] = preprocess_ref_audio_text(
             voices[voice]["ref_audio"], voices[voice]["ref_text"]
+        )
+        voices[voice]["ref_audio_2"], voices[voice]["ref_text_2"] = preprocess_ref_audio_text(
+            voices[voice]["ref_audio_2"], voices[voice]["ref_text_2"]
         )
         print("ref_audio_", voices[voice]["ref_audio"], "\n\n")
 
@@ -333,12 +493,16 @@ def main():
         text = re.sub(reg2, "", text)
         ref_audio_ = voices[voice]["ref_audio"]
         ref_text_ = voices[voice]["ref_text"]
+        ref_audio_2_ = voices[voice]["ref_audio_2"]
+        ref_text_2_ = voices[voice]["ref_text_2"]
         local_speed = voices[voice].get("speed", speed)
         gen_text_ = text.strip()
         print(f"Voice: {voice}")
         audio_segment, final_sample_rate, spectrogram = infer_process(
             ref_audio_,
             ref_text_,
+            ref_audio_2_,
+            ref_text_2_,
             gen_text_,
             ema_model,
             vocoder,
@@ -351,6 +515,16 @@ def main():
             speed=local_speed,
             fix_duration=fix_duration,
             device=device,
+            allow_extrapolation=allow_extrapolation,
+            # ✅阶段一 & 阶段二：混合控制参数
+            mix_method=args.mix_method,
+            mix_schedule=args.mix_schedule,
+            mix_a_start=args.mix_a_start,
+            mix_a_end=args.mix_a_end,
+            mix_2d_mode=args.mix_2d_mode,
+            n_schedule=args.n_schedule,
+            n_a_start=args.n_a_start,
+            n_a_end=args.n_a_end,
         )
         generated_audio_segments.append(audio_segment)
 
