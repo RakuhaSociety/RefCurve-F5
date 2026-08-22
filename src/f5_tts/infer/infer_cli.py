@@ -147,7 +147,13 @@ parser.add_argument(
 parser.add_argument(
     "--load_vocoder_from_local",
     action="store_true",
-    help="To load vocoder from local dir, default to ../checkpoints/vocos-mel-24khz",
+    help="To load vocoder from local dir, auto-detected under ckpts/ (see --vocoder_local_path)",
+)
+parser.add_argument(
+    "--vocoder_local_path",
+    type=str,
+    default=None,
+    help="Explicit local vocoder dir; overrides auto-detection under ckpts/ or ../checkpoints/",
 )
 parser.add_argument(
     "--vocoder_name",
@@ -286,6 +292,28 @@ def _get_ckpt_cache_dir() -> Path:
     return script_path.parent / "ckpts"
 
 
+def _default_vocoder_path(vocoder_name: str) -> str:
+    """Locate a local vocoder dir, preferring the repo's ckpts/ over the upstream ../checkpoints/ layout."""
+    subdirs = {
+        "vocos": ("vocos-mel-24khz", "charactr/vocos-mel-24khz"),
+        "bigvgan": ("bigvgan_v2_24khz_100band_256x", "nvidia/bigvgan_v2_24khz_100band_256x"),
+    }.get(vocoder_name, ())
+
+    roots = [_get_ckpt_cache_dir()]
+    script_path = Path(__file__).resolve()
+    roots += [parent / "checkpoints" for parent in script_path.parents[:5]]
+    roots.append(Path("../checkpoints"))  # 上游默认布局，向后兼容
+
+    for root in roots:
+        for sub in subdirs:
+            candidate = root / sub
+            if (candidate / "config.yaml").exists() or (candidate / "bigvgan_generator.pt").exists():
+                return str(candidate)
+
+    # 都没找到时返回 ckpts/ 下的首选路径，让报错信息指向正确的位置
+    return str(_get_ckpt_cache_dir() / subdirs[0]) if subdirs else ""
+
+
 def _resolve_example_path(path_str: str) -> str:
     """Resolve example assets preferring repo files over installed package."""
     p = Path(path_str)
@@ -403,10 +431,10 @@ if save_chunk:
 
 # load vocoder
 
-if vocoder_name == "vocos":
-    vocoder_local_path = "../checkpoints/vocos-mel-24khz"
-elif vocoder_name == "bigvgan":
-    vocoder_local_path = "../checkpoints/bigvgan_v2_24khz_100band_256x"
+# 优先级：命令行 --vocoder_local_path > toml 的 vocoder_local_path > 自动探测 ckpts/ 与 ../checkpoints/
+vocoder_local_path = (
+    args.vocoder_local_path or config.get("vocoder_local_path") or _default_vocoder_path(vocoder_name)
+)
 
 vocoder = load_vocoder(
     vocoder_name=vocoder_name, is_local=load_vocoder_from_local, local_path=vocoder_local_path, device=device
