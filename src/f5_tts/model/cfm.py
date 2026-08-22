@@ -91,20 +91,45 @@ def slerp_with_norm(a: torch.Tensor, b: torch.Tensor, alpha: torch.Tensor, eps: 
     return dir_fused * norm_fused
 
 
-def log_domain_blend(a: torch.Tensor, b: torch.Tensor, alpha: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+def log_domain_blend(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    alpha: torch.Tensor,
+    eps: float = 1e-8,
+    mode: str = "signed_magnitude",
+) -> torch.Tensor:
     """
     Log-domain 融合（几何平均）：在对数域进行线性插值，等价于几何加权平均。
-    适用于能量/幅度信号的融合，保持乘法特性。
-    
-    注意：mel 频谱可能包含负值（log mel），所以这里处理的是"符号 + 幅度"模式。
-    
+
+    F5-TTS 的条件是 log-mel（见 modules.py 的 log(clamp(mel))），因此存在两种解读，
+    通过 mode 选择，便于 A/B 对比：
+
+    mode="signed_magnitude"（默认，保持历史行为）
+        假设输入是"线性 mel"，取绝对值在 log 域插值再恢复符号：
+        |a|^alpha * |b|^(1-alpha)。
+        由于实际输入是 log-mel，这一步算的是"log 的 log"，在信号处理上没有对应
+        含义；且 alpha 为负时极小值被抬到负指数，会剧烈放大（alpha=-3 实测峰值
+        可达 1e11），alpha 跨过 0.5 时符号会硬性跳变。保留它是因为已有参数可能
+        依赖这一行为。
+
+    mode="logmel"（数学正确解）
+        输入已是 log-mel 时，log(P_a^alpha * P_b^(1-alpha)) = alpha*log(P_a) +
+        (1-alpha)*log(P_b)，即直接线性插值 —— LERP 本身就是几何平均。
+        无溢出、无符号跳变，但此时 log 与 lerp 等价。
+
     Args:
         a: [b, n, d] 第一个条件
-        b: [b, n, d] 第二个条件  
+        b: [b, n, d] 第二个条件
         alpha: [1,1,1] 或标量，a 的权重 (0~1)
+        mode: "signed_magnitude" | "logmel"
     Returns:
         融合结果 [b, n, d]
     """
+    if mode == "logmel":
+        # 输入即 log 域，线性插值等价于功率域的加权几何平均
+        return alpha * a + (1 - alpha) * b
+    if mode != "signed_magnitude":
+        raise ValueError(f"log_blend_mode 需为 'signed_magnitude' 或 'logmel'，收到 {mode!r}")
     # 对于 mel 条件可能含负值的情况，我们取绝对值在 log 域插值，然后恢复符号
     # 另一种做法：直接把负值当作 log-scale 的值处理
     
@@ -135,14 +160,10 @@ def log_domain_blend(a: torch.Tensor, b: torch.Tensor, alpha: torch.Tensor, eps:
     log_fused = alpha * log_a + (1 - alpha) * log_b
     abs_fused = torch.exp(log_fused)
     
-    # 符号处理：当两者同号时保持符号，异号时按权重决定
-    # 简单策略：取主导权重的符号，或者按权重插值符号
-    sign_fused = torch.where(alpha > 0.5, sign_a, sign_b)
-    # 更平滑的策略：同号保持，异号时取加权
-    same_sign = (sign_a == sign_b)
-    sign_fused = torch.where(same_sign, sign_a, 
-                              torch.where(alpha > 0.5, sign_a, sign_b))
-    
+    # 符号处理：同号时保持，异号时取主导权重一侧的符号
+    # 注意 alpha 跨过 0.5 时符号会硬性跳变（这是 signed_magnitude 模式的固有问题）
+    sign_fused = torch.where(sign_a == sign_b, sign_a, torch.where(alpha > 0.5, sign_a, sign_b))
+
     return sign_fused * abs_fused
 
 
@@ -223,6 +244,8 @@ class CFM(nn.Module):
         mix_a_end=0.9,           # t=1 时 a 的权重（比如从A渐变到B）
         mix_on="cond",           # "cond" 或 "pred"
         mix_method="lerp",       # "lerp" | "slerp" | "log"  阶段一：三种混合算法
+        log_blend_mode="signed_magnitude",  # mix_method="log" 时的子模式，见 log_domain_blend 文档
+        n_normalize_to_ref=False,  # n 维度曲线归一化到参考长度而非 max_duration（实验性）
         dynamic_disable_cache=True,
         allow_extrapolation=False,
         
@@ -328,8 +351,18 @@ class CFM(nn.Module):
             mask = None
 
         # ---------- 阶段二：构建 n 维度的位置比例 [1, n, 1] ----------
-        n_ratio = torch.linspace(0, 1, max_duration, device=device, dtype=cond_a.dtype)
-        n_ratio = n_ratio.view(1, -1, 1)  # [1, n, 1] 用于广播
+        if n_normalize_to_ref:
+            # 实验性：曲线归一化到参考覆盖的有效区间，使 n_a_end 真正对应"最后一帧参考"
+            # 而不是被生成文本的长度稀释。这会改变所有现有 n 维度参数的效果。
+            ref_len_max = max(len_a, len_b)
+            n_ratio = torch.linspace(0, 1, ref_len_max, device=device, dtype=cond_a.dtype)
+            # pad 到 max_duration（超出参考的部分将被 cond_mask 遮蔽）
+            n_ratio = F.pad(n_ratio, (0, max_duration - ref_len_max), value=1.0)
+            n_ratio = n_ratio.view(1, -1, 1)
+        else:
+            # 默认：跨全序列（历史行为），导致曲线被压缩在参考前缀、尾部权重随文本长度漂移
+            n_ratio = torch.linspace(0, 1, max_duration, device=device, dtype=cond_a.dtype)
+            n_ratio = n_ratio.view(1, -1, 1)  # [1, n, 1] 用于广播
 
         # ---------- 1) 定义随 t 变化的 alpha_t(t) ----------
         def alpha_of_t(t):
@@ -464,7 +497,7 @@ class CFM(nn.Module):
                 fused = slerp_with_norm(cond_a, cond_b, a)
             elif mix_method == "log":
                 # Log-domain 融合（几何平均）
-                fused = log_domain_blend(cond_a, cond_b, a)
+                fused = log_domain_blend(cond_a, cond_b, a, mode=log_blend_mode)
             else:
                 raise ValueError(f"unknown mix_method: {mix_method}, expected 'lerp', 'slerp', or 'log'")
             

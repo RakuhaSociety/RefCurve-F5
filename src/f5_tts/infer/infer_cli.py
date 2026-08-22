@@ -224,6 +224,18 @@ parser.add_argument(
     help="Mixing method: lerp (linear), slerp (spherical), log (geometric mean)",
 )
 parser.add_argument(
+    "--log_blend_mode",
+    type=str,
+    choices=["signed_magnitude", "logmel"],
+    default="signed_magnitude",
+    help="Log blend sub-mode: signed_magnitude (legacy, overflow-prone) or logmel (mathematically correct for log-mel input)",
+)
+parser.add_argument(
+    "--n_normalize_to_ref",
+    action="store_true",
+    help="Normalize n-dimension curve to reference length instead of max_duration (experimental)",
+)
+parser.add_argument(
     "--mix_schedule",
     type=str,
     choices=["linear", "cosine", "sigmoid"],
@@ -562,6 +574,8 @@ def main():
             # ✅阶段一 & 阶段二：混合控制参数
             mix_method=args.mix_method,
             mix_schedule=args.mix_schedule,
+            log_blend_mode=args.log_blend_mode,
+            n_normalize_to_ref=args.n_normalize_to_ref,
             mix_a_start=args.mix_a_start,
             mix_a_end=args.mix_a_end,
             mix_2d_mode=args.mix_2d_mode,
