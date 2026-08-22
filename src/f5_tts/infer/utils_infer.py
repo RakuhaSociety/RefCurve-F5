@@ -86,6 +86,8 @@ def chunk_text(text, max_chars=135):
     sentences = re.split(r"(?<=[;:,.!?])\s+|(?<=[；：，。！？])", text)
 
     for sentence in sentences:
+        if not sentence:
+            continue
         if len(current_chunk.encode("utf-8")) + len(sentence.encode("utf-8")) <= max_chars:
             current_chunk += sentence + " " if sentence and len(sentence[-1].encode("utf-8")) == 1 else sentence
         else:
@@ -281,12 +283,12 @@ def remove_silence_edges(audio, silence_threshold=-42):
     audio = audio[non_silent_start_idx:]
 
     # Remove silence from the end
-    non_silent_end_duration = audio.duration_seconds
-    for ms in reversed(audio):
-        if ms.dBFS > silence_threshold:
-            break
-        non_silent_end_duration -= 0.001
-    trimmed_audio = audio[: int(non_silent_end_duration * 1000)]
+    reversed_audio = audio.reverse()
+    non_silent_end_idx = silence.detect_leading_silence(reversed_audio, silence_threshold=silence_threshold)
+    if non_silent_end_idx > 0:
+        trimmed_audio = audio[: len(audio) - non_silent_end_idx]
+    else:
+        trimmed_audio = audio
 
     return trimmed_audio
 
@@ -383,11 +385,13 @@ def preprocess_ref_audio_text(ref_audio_orig, ref_text, show_info=print):
 def infer_process(
     ref_audio,
     ref_text,
-    ref_audio_2,
-    ref_text_2,
     gen_text,
     model_obj,
     vocoder,
+    # 改造版：第二参考为关键字可选参数，不传则退化为单参考，
+    # 保持与上游 infer_process(ref_audio, ref_text, gen_text, ...) 的位置参数兼容
+    ref_audio_2=None,
+    ref_text_2="",
     mel_spec_type=mel_spec_type,
     show_info=print,
     progress=tqdm,
@@ -414,20 +418,30 @@ def infer_process(
 ):
     # Split the input text into batches
     audio_a, sr_a = torchaudio.load(ref_audio)
-    audio_b, sr_b = torchaudio.load(ref_audio_2)
+
+    if ref_audio_2 is None:
+        # 单参考模式：退化为原版行为，第二参考复用第一参考
+        audio_b, sr_b = audio_a.clone(), sr_a
+        ref_text_2 = ref_text
+    else:
+        audio_b, sr_b = torchaudio.load(ref_audio_2)
 
     ref_secs = max(audio_a.shape[-1] / sr_a, audio_b.shape[-1] / sr_b)
-    ref_chars = max(len(ref_text.encode("utf-8")) , len(ref_text_2.encode("utf-8")))
+    ref_chars = max(len(ref_text.encode("utf-8")), len(ref_text_2.encode("utf-8")))
 
     max_chars = int(ref_chars / ref_secs * (22 - ref_secs) * speed)
 
-    
     gen_text_batches = chunk_text(gen_text, max_chars=max_chars)
-    for i, gen_text in enumerate(gen_text_batches):
-        print(f"gen_text {i}", gen_text)
+    for i, gen_text_i in enumerate(gen_text_batches):
+        print(f"gen_text {i}", gen_text_i)
     print("\n")
 
     show_info(f"Generating audio in {len(gen_text_batches)} batches...")
+
+    if not gen_text_batches:
+        show_info("No text batches to generate.")
+        return None, target_sample_rate, None
+
     return next(
         infer_batch_process(
             (audio_a, sr_a),
@@ -568,7 +582,20 @@ def infer_batch_process(
     # ----------------------------
     # 2) per-batch inference
     # ----------------------------
-    def process_batch(gen_text):
+    # 上游修复：把 fix_duration 按各分块文本长度分摊，避免每块都用整句时长导致 N 倍膨胀
+    # 改造版：参考时长取两段参考的较大值（与下面 union prompt 的裁剪保持一致）
+    if fix_duration is not None and len(gen_text_batches) > 1:
+        ref_audio_len_frames = max(audio_a.shape[-1], audio_b.shape[-1]) // hop_length
+        ref_sec = ref_audio_len_frames * hop_length / target_sample_rate
+        target_total = fix_duration - ref_sec
+        weights = [len(c.encode("utf-8")) for c in gen_text_batches]
+        total_w = sum(weights)
+        allocatable = target_total + cross_fade_duration * (len(gen_text_batches) - 1)
+        fix_durations = [ref_sec + allocatable * w / total_w for w in weights]
+    else:
+        fix_durations = [fix_duration] * len(gen_text_batches)
+
+    def _infer_basic(gen_text, fix_dur):
         local_speed = speed
         if len(gen_text.encode("utf-8")) < 10:
             local_speed = 0.3
@@ -585,8 +612,9 @@ def infer_batch_process(
         ref_len_b = audio_b.shape[-1] // hop_length
         ref_audio_len = max(ref_len_a, ref_len_b)
 
-        if fix_duration is not None:
-            duration = int(fix_duration * target_sample_rate / hop_length)
+        # 上游修复：用分摊后的 fix_dur，而非整句 fix_duration
+        if fix_dur is not None:
+            duration = int(fix_dur * target_sample_rate / hop_length)
         else:
             # duration estimation uses the longer of the two reference texts to avoid underestimating
             ref_text_len = max(1, len(ref_text.encode("utf-8")), len(ref_text_2.encode("utf-8")))
@@ -642,28 +670,36 @@ def infer_batch_process(
             # wav -> numpy
             generated_wave = generated_wave.squeeze().cpu().numpy()
 
-            if streaming:
-                for j in range(0, len(generated_wave), chunk_size):
-                    yield generated_wave[j : j + chunk_size], target_sample_rate
-            else:
-                generated_cpu = generated[0].cpu().numpy()
-                del generated
-                yield generated_wave, generated_cpu
+        return generated_wave, generated
+
+    def infer_single_process(gen_text, fix_dur):
+        generated_wave, generated = _infer_basic(gen_text, fix_dur)
+        generated_cpu = generated[0].cpu().numpy()
+        del generated
+        return generated_wave, generated_cpu
+
+    def infer_single_process_streaming(gen_text, fix_dur):
+        # for src/f5_tts/socket_server.py
+        generated_wave, generated = _infer_basic(gen_text, fix_dur)
+        del generated
+        for j in range(0, len(generated_wave), chunk_size):
+            yield generated_wave[j : j + chunk_size], target_sample_rate
 
     # ----------------------------
     # 3) output aggregation (same as original)
     # ----------------------------
     if streaming:
-        for gen_text in progress.tqdm(gen_text_batches) if progress is not None else gen_text_batches:
-            for chunk in process_batch(gen_text):
+        batches_iter = progress.tqdm(gen_text_batches) if progress is not None else gen_text_batches
+        for gen_text, fix_dur in zip(batches_iter, fix_durations):
+            for chunk in infer_single_process_streaming(gen_text, fix_dur):
                 yield chunk
     else:
         with ThreadPoolExecutor() as executor:
-            futures = [executor.submit(process_batch, gen_text) for gen_text in gen_text_batches]
+            futures = [executor.submit(infer_single_process, gt, fd) for gt, fd in zip(gen_text_batches, fix_durations)]
             for future in progress.tqdm(futures) if progress is not None else futures:
                 result = future.result()
                 if result:
-                    generated_wave, generated_mel_spec = next(result)
+                    generated_wave, generated_mel_spec = result
                     generated_waves.append(generated_wave)
                     spectrograms.append(generated_mel_spec)
 

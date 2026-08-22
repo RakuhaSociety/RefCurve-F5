@@ -30,6 +30,9 @@
 # Create a conda env with python_version>=3.10  (you could also use virtualenv)
 conda create -n f5-tts python=3.11
 conda activate f5-tts
+
+# Install FFmpeg if you haven't yet
+conda install ffmpeg
 ```
 
 ### Install PyTorch with matched device
@@ -39,7 +42,11 @@ conda activate f5-tts
 
 > ```bash
 > # Install pytorch with your CUDA version, e.g.
+> pip install torch==2.8.0+cu128 torchaudio==2.8.0+cu128 --extra-index-url https://download.pytorch.org/whl/cu128
+> 
+> # And also possible previous versions, e.g.
 > pip install torch==2.4.0+cu124 torchaudio==2.4.0+cu124 --extra-index-url https://download.pytorch.org/whl/cu124
+> # etc.
 > ```
 
 </details>
@@ -49,8 +56,17 @@ conda activate f5-tts
 
 > ```bash
 > # Install pytorch with your ROCm version (Linux only), e.g.
-> pip install torch==2.5.1+rocm6.2 torchaudio==2.5.1+rocm6.2 --extra-index-url https://download.pytorch.org/whl/rocm6.2
+> pip install torch==2.9.1+rocm7.2 torchaudio==2.9.1+rocm7.2 --extra-index-url https://download.pytorch.org/whl/rocm7.2
+>
+> # For older GPUs (RDNA1/2/3 only):
+> # pip install torch==2.5.1+rocm6.2 torchaudio==2.5.1+rocm6.2 --extra-index-url https://download.pytorch.org/whl/rocm6.2
 > ```
+>
+> **Note:** RDNA 3.5 and RDNA 4 GPUs (Radeon 8050S/8060S, RX 9060/9070 series) require
+> ROCm 7.x — these architectures (gfx1151/gfx1201) are not included in ROCm 6.x
+> ([6.2 compatibility matrix](https://rocm.docs.amd.com/en/docs-6.2.4/compatibility/compatibility-matrix.html) vs
+> [7.2 compatibility matrix](https://rocm.docs.amd.com/en/docs-7.2.3/compatibility/compatibility-matrix.html)).
+> Using ROCm 6.x on these GPUs causes `HIP error: invalid device function` ([#1236](https://github.com/SWivid/F5-TTS/issues/1236)).
 
 </details>
 

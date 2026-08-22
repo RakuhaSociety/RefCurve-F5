@@ -17,6 +17,8 @@
 ### Supported Languages
 - [Multilingual](#multilingual)
     - [F5-TTS v1 v0 Base @ zh \& en @ F5-TTS](#f5-tts-v1-v0-base--zh--en--f5-tts)
+- [Arabic](#arabic)
+    - [F5-TTS Small @ ar & en @ SILMA AI](#f5-tts-small--ar--en--silma-ai)
 - [English](#english)
 - [Finnish](#finnish)
     - [F5-TTS Base @ fi @ AsmoKoskinen](#f5-tts-base--fi--asmokoskinen)
@@ -30,6 +32,8 @@
     - [F5-TTS Base @ it @ alien79](#f5-tts-base--it--alien79)
 - [Japanese](#japanese)
     - [F5-TTS Base @ ja @ Jmica](#f5-tts-base--ja--jmica)
+- [Latvian](#latvian)
+    - [F5-TTS Base @ lv @ RaivisDejus](#f5-tts-base--lv--raivisdejus)
 - [Mandarin](#mandarin)
 - [Russian](#russian)
     - [F5-TTS Base @ ru @ HotDro4illa](#f5-tts-base--ru--hotdro4illa)
@@ -62,6 +66,17 @@ Config: {"dim": 1024, "depth": 22, "heads": 16, "ff_mult": 2, "text_dim": 512, "
 ```
 
 *Other infos, e.g. Author info, Github repo, Link to some sampled results, Usage instruction, Tutorial (Blog, Video, etc.) ...*
+
+
+## Arabic
+
+#### F5-TTS Small @ ar & en @ SILMA AI
+|Model|🤗Hugging Face|Data (Hours)|Model License|
+|:---:|:------------:|:-----------:|:-------------:|
+|F5-TTS Small|[ckpt & vocab](https://huggingface.co/silma-ai/silma-tts)| Tens of thousands EN/AR |Apache-2.0|
+
+- Pretrained by [SILMA.AI](https://silma.ai)
+- [GitHub repo](https://github.com/SILMA-AI/silma-tts), Inference code
 
 
 ## English
@@ -160,6 +175,20 @@ Config: {"dim": 1024, "depth": 22, "heads": 16, "ff_mult": 2, "text_dim": 512, "
 ```bash
 Model: hf://Jmica/F5TTS/JA_21999120/model_21999120.pt
 Vocab: hf://Jmica/F5TTS/JA_21999120/vocab_japanese.txt
+Config: {"dim": 1024, "depth": 22, "heads": 16, "ff_mult": 2, "text_dim": 512, "text_mask_padding": False, "conv_layers": 4, "pe_attn_head": 1}
+```
+
+
+## Latvian
+
+#### F5-TTS Base @ lv @ RaivisDejus
+|Model|🤗Hugging Face|Data (Hours)|Model License|
+|:---:|:------------:|:-----------:|:-------------:|
+|F5-TTS Base|[ckpt & vocab](https://huggingface.co/RaivisDejus/F5-TTS-Latvian)|[Common voice](https://datacollective.mozillafoundation.org/datasets/cmj8u3pec00flnxxbntvfb4as)|cc0-1.0|
+
+```bash
+Model: hf://RaivisDejus/F5-TTS-Latvian/model.safetensors
+Vocab: hf://RaivisDejus/F5-TTS-Latvian/vocab.txt
 Config: {"dim": 1024, "depth": 22, "heads": 16, "ff_mult": 2, "text_dim": 512, "text_mask_padding": False, "conv_layers": 4, "pe_attn_head": 1}
 ```
 

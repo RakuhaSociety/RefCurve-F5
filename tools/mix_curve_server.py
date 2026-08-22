@@ -102,11 +102,11 @@ async def infer_endpoint(
     audio_np, sr, _ = infer_process(
         ref_a_path,
         ref_text_a,
-        ref_b_path,
-        ref_text_b,
         gen_text,
         model,
         vocoder,
+        ref_audio_2=ref_b_path,
+        ref_text_2=ref_text_b,
         mel_spec_type="vocos",
         target_rms=target_rms,
         cross_fade_duration=cross_fade_duration,

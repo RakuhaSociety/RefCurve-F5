@@ -438,6 +438,7 @@ elif model == "E2TTS_Base":
     ckpt_step = 1200000
 
 if not ckpt_file:
+    # 改造版：下载到仓库本地 ckpts/ 而非全局 HF 缓存
     ckpt_cache_dir = _get_ckpt_cache_dir()
     ckpt_cache_dir.mkdir(parents=True, exist_ok=True)
     ckpt_file = str(
@@ -446,6 +447,11 @@ if not ckpt_file:
             cache_dir=ckpt_cache_dir,
         )
     )
+elif ckpt_file.startswith("hf://"):
+    ckpt_file = str(cached_path(ckpt_file, cache_dir=_get_ckpt_cache_dir()))
+
+if vocab_file.startswith("hf://"):
+    vocab_file = str(cached_path(vocab_file, cache_dir=_get_ckpt_cache_dir()))
 
 print(f"Using {model}...")
 ema_model = load_model(
@@ -501,11 +507,11 @@ def main():
         audio_segment, final_sample_rate, spectrogram = infer_process(
             ref_audio_,
             ref_text_,
-            ref_audio_2_,
-            ref_text_2_,
             gen_text_,
             ema_model,
             vocoder,
+            ref_audio_2=ref_audio_2_,
+            ref_text_2=ref_text_2_,
             mel_spec_type=vocoder_name,
             target_rms=target_rms,
             cross_fade_duration=cross_fade_duration,

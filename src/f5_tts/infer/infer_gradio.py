@@ -221,7 +221,7 @@ with gr.Blocks() as app_tts:
         )
         gen_text_file = gr.File(label="Load Text to Generate from File (.txt)", file_types=[".txt"], scale=1)
     generate_btn = gr.Button("Synthesize", variant="primary")
-    with gr.Accordion("Advanced Settings", open=False):
+    with gr.Accordion("Advanced Settings", open=True) as adv_settn:
         with gr.Row():
             ref_text_input = gr.Textbox(
                 label="Reference Text",
@@ -268,6 +268,17 @@ with gr.Blocks() as app_tts:
             step=0.01,
             info="Set the duration of the cross-fade between audio clips.",
         )
+
+    def collapse_accordion():
+        return gr.Accordion(open=False)
+
+    # Workaround for https://github.com/SWivid/F5-TTS/issues/1239#issuecomment-3677987413
+    # i.e. to set gr.Accordion(open=True) by default, then collapse manually Blocks loaded
+    app_tts.load(
+        fn=collapse_accordion,
+        inputs=None,
+        outputs=adv_settn,
+    )
 
     audio_output = gr.Audio(label="Synthesized Audio")
     spectrogram_output = gr.Image(label="Spectrogram")
@@ -577,7 +588,7 @@ with gr.Blocks() as app_multistyle:
         label="Cherry-pick Interface",
         lines=10,
         max_lines=40,
-        show_copy_button=True,
+        buttons=["copy"],  # show_copy_button=True if gradio<6.0
         interactive=False,
         visible=False,
     )
@@ -816,7 +827,9 @@ Have a conversation with an AI using your reference voice!
                         lines=2,
                     )
 
-        chatbot_interface = gr.Chatbot(label="Conversation", type="messages")
+        chatbot_interface = gr.Chatbot(
+            label="Conversation"
+        )  # type="messages" hard-coded and no need to pass in since gradio 6.0
 
         with gr.Row():
             with gr.Column():
@@ -853,6 +866,10 @@ Have a conversation with an AI using your reference voice!
         @gpu_decorator
         def generate_text_response(conv_state, system_prompt):
             """Generate text response from AI"""
+            for single_state in conv_state:
+                if isinstance(single_state["content"], list):
+                    assert len(single_state["content"]) == 1 and single_state["content"][0]["type"] == "text"
+                    single_state["content"] = single_state["content"][0]["text"]
 
             system_prompt_state = [{"role": "system", "content": system_prompt}]
             response = chat_model_inference(system_prompt_state + conv_state, chat_model_state, chat_tokenizer_state)
@@ -866,7 +883,7 @@ Have a conversation with an AI using your reference voice!
             if not conv_state or not ref_audio:
                 return None, ref_text, seed_input
 
-            last_ai_response = conv_state[-1]["content"]
+            last_ai_response = conv_state[-1]["content"][0]["text"]
             if not last_ai_response or conv_state[-1]["role"] != "assistant":
                 return None, ref_text, seed_input
 
@@ -1108,7 +1125,6 @@ def main(port, host, share, api, root_path, inbrowser):
         server_name=host,
         server_port=port,
         share=share,
-        show_api=api,
         root_path=root_path,
         inbrowser=inbrowser,
     )
