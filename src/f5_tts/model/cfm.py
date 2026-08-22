@@ -33,11 +33,14 @@ from f5_tts.model.utils import (
 
 # ========== 阶段一：两种 cond 混合方法 ==========
 
-def slerp_with_norm(a: torch.Tensor, b: torch.Tensor, alpha: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+def slerp_with_norm(a: torch.Tensor, b: torch.Tensor, alpha: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     """
     SLERP-with-norm: 方向用 SLERP，幅度用 LERP。
     适用于将两个 mel 条件嵌入沿球面插值（方向），同时线性插值它们的能量/幅度。
-    
+
+    注意 eps 与 dtype：fp16 无法表示 1e-8（会退化为 0，使所有除零保护失效并产生 NaN），
+    因此内部统一提升到 fp32 计算，最后再转回入参 dtype。
+
     Args:
         a: [b, n, d] 第一个条件
         b: [b, n, d] 第二个条件
@@ -45,6 +48,13 @@ def slerp_with_norm(a: torch.Tensor, b: torch.Tensor, alpha: torch.Tensor, eps: 
     Returns:
         融合结果 [b, n, d]
     """
+    out_dtype = a.dtype
+    if out_dtype not in (torch.float32, torch.float64):
+        a = a.float()
+        b = b.float()
+        alpha = alpha.float() if torch.is_tensor(alpha) else alpha
+        return slerp_with_norm(a, b, alpha, eps=eps).to(out_dtype)
+
     # 计算范数
     norm_a = a.norm(dim=-1, keepdim=True).clamp(min=eps)  # [b, n, 1]
     norm_b = b.norm(dim=-1, keepdim=True).clamp(min=eps)
@@ -289,7 +299,7 @@ class CFM(nn.Module):
             duration = torch.full((batch,), duration, device=device, dtype=torch.long)
 
         duration = torch.maximum(
-            torch.maximum((text != -1).sum(dim=-1), lens) + 1, duration
+            torch.maximum((text != -1).sum(dim=-1), lens_union) + 1, duration
         )  # duration at least text/audio prompt length plus one token, so something is generated
         duration = duration.clamp(max=max_duration)
         max_duration = duration.amax()
@@ -344,9 +354,12 @@ class CFM(nn.Module):
             return a if allow_extrapolation else a.clamp(0.0, 1.0)
 
         # ---------- 阶段二：定义随 n 变化的 alpha_n(n_ratio) ----------
+        # n 维度是否真正启用（未启用时 alpha_of_n 返回全 1，仅对 multiply/min 是恒等元）
+        n_dim_enabled = not single_ref and n_a_start is not None and n_a_end is not None
+
         def alpha_of_n():
             """计算 n 维度的权重，返回 [1, n, 1]"""
-            if single_ref or n_a_start is None or n_a_end is None:
+            if not n_dim_enabled:
                 # 单参考模式，或未启用 n 维度：返回全 1（不影响最终权重）
                 return torch.ones_like(n_ratio)
             
@@ -384,7 +397,13 @@ class CFM(nn.Module):
             返回 [1, n, 1] 形状的权重（每帧可能不同）。
             """
             alpha_t = alpha_of_t(t)  # 标量
-            
+
+            # n 维度未启用时，除 t_only 外的各模式不能一律用"全 1"当恒等元：
+            # add 会得到 (alpha_t+1)/2、max/n_only 会被钳死在 1.0（B 完全失效）。
+            # 因此此时直接退回 t 维度结果。
+            if not n_dim_enabled and mix_2d_mode != "t_only":
+                return alpha_t.view(1, 1, 1).expand(1, max_duration, 1)
+
             if mix_2d_mode == "t_only":
                 # 向后兼容：只用 t 维度
                 return alpha_t.view(1, 1, 1).expand(1, max_duration, 1)
@@ -429,6 +448,10 @@ class CFM(nn.Module):
 
         # ---------- 2) 融合 cond（按 mask 处理 padding 区） ----------
         def fused_cond(t):
+            # 单参考模式：直接返回 A，与上游逐位一致（避免走混合算法引入数值误差）
+            if single_ref:
+                return cond_a
+
             # 获取组合后的 alpha [1, n, 1]
             a = combined_alpha(t).to(cond_a.dtype)
             
