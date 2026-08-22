@@ -406,6 +406,7 @@ def infer_process(
     ref_audio_2=None,
     ref_text_2="",
     # ========== 阶段一 & 阶段二：混合控制参数 ==========
+    mix_on="cond",       # "cond" 或 "pred"：混合发生在条件空间还是预测空间
     mix_method="lerp",
     mix_schedule="linear",
     log_blend_mode="logmel",
@@ -469,6 +470,7 @@ def infer_process(
             ref_text_2=ref_text_2,
             
             # ✅阶段一 & 阶段二：混合控制参数
+            mix_on=mix_on,
             mix_method=mix_method,
             mix_schedule=mix_schedule,
             log_blend_mode=log_blend_mode,
@@ -511,6 +513,7 @@ def infer_batch_process(
     ref_audio_2=None,   # (audio2, sr2)；不传则退化为单参考
     ref_text_2="",
     # ===== 阶段一 & 阶段二：混合控制参数 =====
+    mix_on="cond",
     mix_method="lerp",
     mix_schedule="linear",
     log_blend_mode="logmel",
@@ -644,6 +647,7 @@ def infer_batch_process(
                 seed=seed,
                 allow_extrapolation=allow_extrapolation,
                 # ✅阶段一 & 阶段二：混合控制参数
+                mix_on=mix_on,
                 mix_method=mix_method,
                 mix_schedule=mix_schedule,
                 log_blend_mode=log_blend_mode,

@@ -151,6 +151,7 @@ def run_inference(
     cfg,
     sway_coef,
     speed_val,
+    mix_on,
     mix_method,
     mix_schedule,
     mix_a_start,
@@ -224,6 +225,7 @@ def run_inference(
         device=model_device,
         allow_extrapolation=allow_extrapolation,
         seed=seed_val,
+        mix_on=mix_on,
         mix_method=mix_method,
         mix_schedule=mix_schedule,
         mix_a_start=mix_a_start,
@@ -406,6 +408,12 @@ def build_interface():
                         speed_val = gr.Slider(0.3, 2.0, value=speed, step=0.05, label="语速倍率")
                         seed = gr.Number(value=None, label="Seed（留空随机）", precision=0)
                         gr.Markdown("### 混合参数")
+                        mix_on = gr.Radio(
+                            ["cond", "pred"],
+                            value="cond",
+                            label="混合模式",
+                            info="cond: 混合条件(快); pred: 混合预测(慢2倍,理论更强)"
+                        )
                         mix_method = gr.Radio(["lerp", "slerp", "log"], value="slerp", label="混合算法")
                         mix_schedule = gr.Radio(["linear", "cosine", "sigmoid"], value="linear", label="t 维度曲线")
                         mix_a_start = gr.Slider(-1.0, 2.0, value=0.5, step=0.05, label="t=0 A 权重")
@@ -431,6 +439,7 @@ def build_interface():
                         cfg,
                         sway_coef,
                         speed_val,
+                        mix_on,
                         mix_method,
                         mix_schedule,
                         mix_a_start,
