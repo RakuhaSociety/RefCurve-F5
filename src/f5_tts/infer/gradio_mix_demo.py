@@ -1,5 +1,4 @@
 import os
-import tempfile
 from importlib.resources import files
 from pathlib import Path
 from typing import Optional
@@ -7,7 +6,6 @@ from typing import Optional
 import gradio as gr
 import torch
 from omegaconf import OmegaConf
-import torchaudio
 
 from f5_tts.infer.utils_infer import (
     cfg_strength,
@@ -239,42 +237,11 @@ def run_inference(
     return (sr, audio_np)
 
 
-def _prepare_transfer_audio(ref_a_path: Path, ref_b_path: Path, ref_c_path: Path, scale: float = 1.0):
-    """
-    Construct an augmented reference: C + scale * (B - A).
-    Returns path to augmented wav and aligned C wav (both trimmed to min length).
-    """
-    def load_audio(path: Path):
-        audio, sr = torchaudio.load(str(path))
-        if audio.shape[0] > 1:
-            audio = torch.mean(audio, dim=0, keepdim=True)
-        if sr != 24000:
-            audio = torchaudio.transforms.Resample(sr, 24000)(audio)
-        return audio
-
-    a = load_audio(ref_a_path)
-    b = load_audio(ref_b_path)
-    c = load_audio(ref_c_path)
-    min_len = min(a.shape[-1], b.shape[-1], c.shape[-1])
-    a = a[..., :min_len]
-    b = b[..., :min_len]
-    c = c[..., :min_len]
-    aug = c + scale * (b - a)
-
-    tmp_c = Path(tempfile.NamedTemporaryFile(delete=False, suffix="_c.wav").name)
-    tmp_aug = Path(tempfile.NamedTemporaryFile(delete=False, suffix="_aug.wav").name)
-    torchaudio.save(str(tmp_c), c, 24000)
-    torchaudio.save(str(tmp_aug), aug, 24000)
-    return tmp_c, tmp_aug
-
-
 def run_inference_transfer(
     ref_audio_a,
     ref_text_a,
     ref_audio_b,
     ref_text_b,
-    ref_audio_c,
-    ref_text_c,
     gen_text,
     steps,
     cfg,
@@ -291,15 +258,18 @@ def run_inference_transfer(
     allow_extrapolation,
     seed,
     use_asr,
-    diff_scale,
 ):
-    if not ref_audio_a or not ref_audio_b or not ref_audio_c:
-        raise gr.Error("请提供三段参考音频 (A/B/C)")
+    """
+    双参考情绪风格混合推理（pred 模式）。
+
+    A/B 是两端参考音频，在速度场空间按权重混合生成目标音色和风格。
+    """
+    if not ref_audio_a or not ref_audio_b:
+        raise gr.Error("请提供两段参考音频 (A/B)")
 
     pa = Path(ref_audio_a)
     pb = Path(ref_audio_b)
-    pc = Path(ref_audio_c)
-    for p in (pa, pb, pc):
+    for p in (pa, pb):
         if not p.exists():
             raise gr.Error("音频文件不存在，请重新上传")
 
@@ -316,22 +286,13 @@ def run_inference_transfer(
             res = asr.generate(input=str(pb), batch_size=1)
             ref_text_b = res[0].get("text", "") if isinstance(res, list) else res.get("text", "")
             ref_text_b = _clean_cn_text(ref_text_b)
-        if not ref_text_c.strip():
-            res = asr.generate(input=str(pc), batch_size=1)
-            ref_text_c = res[0].get("text", "") if isinstance(res, list) else res.get("text", "")
-            ref_text_c = _clean_cn_text(ref_text_c)
     else:
         ref_text_a = ref_text_a if ref_text_a.strip() else "."
         ref_text_b = ref_text_b if ref_text_b.strip() else "."
-        ref_text_c = ref_text_c if ref_text_c.strip() else "."
 
-    # Preprocess A/B/C (silence trim etc.)
+    # Preprocess A/B (silence trim etc.)
     pa_proc, ref_text_a = preprocess_ref_audio_text(str(pa), ref_text_a)
     pb_proc, ref_text_b = preprocess_ref_audio_text(str(pb), ref_text_b)
-    pc_proc, ref_text_c = preprocess_ref_audio_text(str(pc), ref_text_c)
-
-    # Build augmented reference: C + scale*(B-A)
-    c_path_aligned, aug_path = _prepare_transfer_audio(Path(pa_proc), Path(pb_proc), Path(pc_proc), scale=diff_scale)
 
     # n_schedule normalize
     if n_schedule in ("none", "None", None):
@@ -345,13 +306,13 @@ def run_inference_transfer(
             raise gr.Error("Seed 需要是整数或留空")
 
     audio_np, sr, _ = infer_process(
-        str(c_path_aligned),
-        ref_text_c,
+        pa_proc,
+        ref_text_a,
         gen_text,
         model,
         vocoder,
-        ref_audio_2=str(aug_path),
-        ref_text_2=ref_text_c,
+        ref_audio_2=pb_proc,
+        ref_text_2=ref_text_b,
         mel_spec_type="vocos",
         target_rms=target_rms,
         cross_fade_duration=cross_fade_duration,
@@ -363,6 +324,7 @@ def run_inference_transfer(
         device=model_device,
         allow_extrapolation=allow_extrapolation,
         seed=seed_val,
+        mix_on="pred",
         mix_method=mix_method,
         mix_schedule=mix_schedule,
         mix_a_start=mix_a_start,
@@ -372,13 +334,6 @@ def run_inference_transfer(
         n_a_start=n_a_start,
         n_a_end=n_a_end,
     )
-
-    # cleanup temp files
-    for p in (c_path_aligned, aug_path):
-        try:
-            Path(p).unlink(missing_ok=True)
-        except Exception:
-            pass
 
     return (sr, audio_np)
 
@@ -409,17 +364,66 @@ def build_interface():
                         seed = gr.Number(value=None, label="Seed（留空随机）", precision=0)
                         gr.Markdown("### 混合参数")
                         mix_on = gr.Radio(
-                            ["cond", "pred"],
-                            value="cond",
+                            ["cond", "pred", "output"],
+                            value="pred",
                             label="混合模式",
-                            info="cond: 混合条件(快); pred: 混合预测(慢2倍,理论更强)"
+                            info=(
+                                "pred（推荐）: 每步分别用 A / B 各推理一次再混合速度场，"
+                                "开销翻倍但音素结构不被破坏、情绪控制最准确，且每个分支用"
+                                "自己的转写（文本与音频自洽）。适合绝大多数场景。"
+                                "cond: 逐帧混合 mel 条件后推理 1 次，快但两参考共用一条文本"
+                                "（按权重二选一），较短参考主导时可能吞字。"
+                                "output: 两条参考各自完整生成一遍，再用 DTW 在 mel 域对齐后混合。"
+                                "⚠️ 跨说话人时会听出明显叠音——DTW 在 mel 帧上找不准音素对应，"
+                                "且成品频谱直接平均会抹平共振峰。仅适合同说话人不同语速、"
+                                "或确实需要节奏随权重插值的场景。"
+                            ),
                         )
-                        mix_method = gr.Radio(["lerp", "slerp", "log"], value="slerp", label="混合算法")
-                        mix_schedule = gr.Radio(["linear", "cosine", "sigmoid"], value="linear", label="t 维度曲线")
-                        mix_a_start = gr.Slider(-1.0, 2.0, value=0.5, step=0.05, label="t=0 A 权重")
-                        mix_a_end = gr.Slider(-1.0, 2.0, value=0.5, step=0.05, label="t=1 A 权重")
-                        mix_2d_mode = gr.Radio(["t_only", "n_only", "multiply", "add", "max", "min"], value="t_only", label="2D 组合模式")
-                        n_schedule = gr.Radio(["none", "linear", "cosine", "sigmoid"], value="linear", label="n 维度曲线")
+                        mix_method = gr.Radio(
+                            ["lerp", "slerp", "log"],
+                            value="slerp",
+                            label="混合算法",
+                            info=(
+                                "cond / output 模式下生效。pred 模式混合的是速度场"
+                                "（切空间向量，线性可加），恒用线性混合，此项被忽略。"
+                            ),
+                        )
+                        mix_schedule = gr.Radio(
+                            ["linear", "cosine", "sigmoid"],
+                            value="linear",
+                            label="t 维度曲线（仅 cond / pred）",
+                            info="output 模式没有扩散时间轴，此项被忽略。",
+                        )
+                        mix_a_start = gr.Slider(
+                            -1.0,
+                            2.0,
+                            value=0.5,
+                            step=0.05,
+                            label="t=0 A 权重",
+                            info=(
+                                "output 模式下：n 维度曲线为 none 时它是唯一的标量 A 权重；"
+                                "无论曲线开关，它都决定节奏（输出时长）偏向 A 还是 B。"
+                            ),
+                        )
+                        mix_a_end = gr.Slider(
+                            -1.0, 2.0, value=0.5, step=0.05, label="t=1 A 权重（仅 cond / pred）"
+                        )
+                        mix_2d_mode = gr.Radio(
+                            ["t_only", "n_only", "multiply", "add", "max", "min"],
+                            value="t_only",
+                            label="2D 组合模式（仅 cond / pred）",
+                            info="output 模式无 t / n 两维可组合，此项被忽略。",
+                        )
+                        n_schedule = gr.Radio(
+                            ["none", "linear", "cosine", "sigmoid"],
+                            value="linear",
+                            label="n 维度曲线",
+                            info=(
+                                "三种模式均生效。output 模式下选 none 时用「t=0 A 权重」作为标量权重；"
+                                "选其他曲线则改用 n=0 / n=1 权重做帧级控制（如开头偏 A、结尾偏 B），"
+                                "此时「t=0 A 权重」仅用于决定节奏偏向。"
+                            ),
+                        )
                         n_a_start = gr.Slider(-1.0, 2.0, value=0.5, step=0.05, label="n=0 A 权重", interactive=True)
                         n_a_end = gr.Slider(-1.0, 2.0, value=0.5, step=0.05, label="n=1 A 权重", interactive=True)
                         allow_extrapolation = gr.Checkbox(value=True, label="允许权重超出[0,1]")
@@ -453,68 +457,6 @@ def build_interface():
                         use_asr,
                     ],
                     outputs=[out_audio],
-                )
-
-            with gr.Tab("三参考情绪迁移"):
-                with gr.Row():
-                    with gr.Column():
-                        ref_audio_a3 = gr.Audio(label="参考音频 A (情绪基准)", type="filepath")
-                        ref_text_a3 = gr.Textbox(label="参考文本 A (可留空自动转写)")
-                        ref_audio_b3 = gr.Audio(label="参考音频 B (情绪目标)", type="filepath")
-                        ref_text_b3 = gr.Textbox(label="参考文本 B (可留空自动转写)")
-                        ref_audio_c3 = gr.Audio(label="参考音频 C (声线基底)", type="filepath")
-                        ref_text_c3 = gr.Textbox(label="参考文本 C (可留空自动转写)")
-                        gen_text3 = gr.Textbox(label="生成文本", value="让我们一起说中文。")
-                        use_asr3 = gr.Checkbox(value=False, label="启用自动转写（FunASR Paraformer，无需 ffmpeg）")
-                        diff_scale = gr.Slider(0.0, 2.0, value=1.0, step=0.05, label="差分缩放 (B-A)")
-                    with gr.Column():
-                        steps3 = gr.Slider(8, 64, value=nfe_step, step=1, label="NFE steps")
-                        cfg3 = gr.Slider(0.0, 5.0, value=cfg_strength, step=0.1, label="CFG strength")
-                        sway_coef3 = gr.Slider(-2.0, 2.0, value=sway_sampling_coef, step=0.1, label="Sway coef")
-                        speed_val3 = gr.Slider(0.3, 2.0, value=speed, step=0.05, label="语速倍率")
-                        seed3 = gr.Number(value=None, label="Seed（留空随机）", precision=0)
-                        gr.Markdown("### 混合参数 (控制情绪注入强度)")
-                        mix_method3 = gr.Radio(["lerp", "slerp", "log"], value="lerp", label="混合算法")
-                        mix_schedule3 = gr.Radio(["linear", "cosine", "sigmoid"], value="linear", label="t 维度曲线")
-                        mix_a_start3 = gr.Slider(-3.0, 3.0, value=0.0, step=0.05, label="t=0 情绪强度 (可放大/反转)")
-                        mix_a_end3 = gr.Slider(-3.0, 3.0, value=1.0, step=0.05, label="t=1 情绪强度 (可放大/反转)")
-                        mix_2d_mode3 = gr.Radio(["t_only", "n_only", "multiply", "add", "max", "min"], value="t_only", label="2D 组合模式")
-                        n_schedule3 = gr.Radio(["none", "linear", "cosine", "sigmoid"], value="none", label="n 维度曲线")
-                        n_a_start3 = gr.Slider(-3.0, 3.0, value=1.0, step=0.05, label="n=0 情绪强度 (可放大/反转)", interactive=True)
-                        n_a_end3 = gr.Slider(-3.0, 3.0, value=1.0, step=0.05, label="n=1 情绪强度 (可放大/反转)", interactive=True)
-                        allow_extrapolation3 = gr.Checkbox(value=True, label="允许权重超出[0,1] (放大/反转时需开启)")
-
-                run_btn3 = gr.Button("生成（三参考情绪迁移）")
-                out_audio3 = gr.Audio(label="生成音频", type="numpy")
-
-                run_btn3.click(
-                    fn=run_inference_transfer,
-                    inputs=[
-                        ref_audio_a3,
-                        ref_text_a3,
-                        ref_audio_b3,
-                        ref_text_b3,
-                        ref_audio_c3,
-                        ref_text_c3,
-                        gen_text3,
-                        steps3,
-                        cfg3,
-                        sway_coef3,
-                        speed_val3,
-                        mix_method3,
-                        mix_schedule3,
-                        mix_a_start3,
-                        mix_a_end3,
-                        mix_2d_mode3,
-                        n_schedule3,
-                        n_a_start3,
-                        n_a_end3,
-                        allow_extrapolation3,
-                        seed3,
-                        use_asr3,
-                        diff_scale,
-                    ],
-                    outputs=[out_audio3],
                 )
 
     return demo

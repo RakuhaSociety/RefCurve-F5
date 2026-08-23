@@ -1,12 +1,10 @@
 # F5TTS_v1_Base | E2TTS_Base
 model = "F5TTS_v1_Base"
-# infer/examples/multi/main.flac
-ref_audio = "infer/examples/basic/xian-yasashi.wav"
+# ref_audio = "infer/examples/basic/your_ref.wav"
 # If an empty "", transcribes the reference audio automatically.
-ref_text = "果然在你心目中，我比卷子重要，只要你想，都能满足你"
-ref_audio_2 = "infer/examples/basic/xian-normal.wav"
-# If an empty "", transcribes the reference audio automatically.
-ref_text_2 = "所以，我每天都在小镇散步，想着能再遇见他就好了"
+ref_text = ""
+# ref_audio_2 = "infer/examples/basic/your_ref_2.wav"
+ref_text_2 = ""
 gen_text = "巨大的建筑，总是由一木一石叠起来的，我们何妨做做这一木一石呢？我时常做些零碎事，就是为此。 "
 # File with text to generate. Ignores the text above.
 gen_file = ""

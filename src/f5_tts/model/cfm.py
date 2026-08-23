@@ -224,6 +224,7 @@ class CFM(nn.Module):
         duration: int | int["b"],
         *,
         cond_b=None,          # 新增：第二参考
+        text_b=None,          # 新增：第二参考自己的文本（仅 mix_on="pred" 使用）
         lens: int["b"] | None = None,
         lens_b=None,          # 新增：第二参考长度（mel 帧数）
         steps=32,
@@ -266,6 +267,7 @@ class CFM(nn.Module):
         # "2d_grid": 使用 2D 权重网格 [steps, n_frames]
         mix_2d_mode="t_only",
         mix_2d_weights=None,     # 可选: 直接传入 2D 权重矩阵 [steps, n_frames]
+
     ):
         self.eval()
         # raw wave
@@ -285,12 +287,14 @@ class CFM(nn.Module):
 
         def to_mel(x):
             # x: [b, nw] raw wave or [b, n, d] mel
+            if x is None:
+                return None
             if x.ndim == 2:
                 x = self.mel_spec(x)      # [b, d, n]
                 x = x.permute(0, 2, 1)    # [b, n, d]
                 assert x.shape[-1] == self.num_channels
             return x.to(next(self.parameters()).dtype)
-        
+
         cond_a = to_mel(cond)
         cond_b = to_mel(cond_b)
 
@@ -307,16 +311,28 @@ class CFM(nn.Module):
         mask_a = lens_to_mask(lens)       # [b, len_a]
         mask_b = lens_to_mask(lens_b)     # [b, len_b]
 
-        # 统一参考长度：用“更长的参考长度”参与 duration 下限约束
+        # 统一参考长度：用”更长的参考长度”参与 duration 下限约束
         lens_union = torch.maximum(lens, lens_b)
 
         # text
-        if isinstance(text, list):
-            if exists(self.vocab_char_map):
-                text = list_str_to_idx(text, self.vocab_char_map).to(device)
-            else:
-                text = list_str_to_tensor(text).to(device)
-            assert text.shape[0] == batch
+        def encode_text(t):
+            if isinstance(t, list):
+                if exists(self.vocab_char_map):
+                    t = list_str_to_idx(t, self.vocab_char_map).to(device)
+                else:
+                    t = list_str_to_tensor(t).to(device)
+                assert t.shape[0] == batch
+            return t
+
+        text = encode_text(text)
+
+        # ✅ text_b：第二参考自己的 prompt 文本。
+        # cond/output 模式不需要它（cond 只有一个文本序列；output 在 infer 层各跑
+        # 一次单参考推理，文本天然自洽）。只有 pred 需要：它每步分别用 cond_a /
+        # cond_b 各跑一次 forward，若两次都喂同一条文本，B 支路就是"B 的音频 +
+        # A 的转写"，文本描述的不是它自己的参考。
+        # 为 None 时退化为共用 text，与改动前逐位一致。
+        text_b = encode_text(text_b) if text_b is not None else None
 
         if isinstance(duration, int):
             duration = torch.full((batch,), duration, device=device, dtype=torch.long)
@@ -515,7 +531,15 @@ class CFM(nn.Module):
             step_cond = torch.where(cond_mask, fused_cond(t), torch.zeros_like(cond_a))
 
             # 动态 cond 时，建议关 cache（避免 transformer 复用旧 cond 特征）
-            use_cache = not (dynamic_disable_cache and (mix_schedule is not None))
+            # ✅ pred 模式 + text_b 启用时也必须关 cache：DiT 的 cache 只按 drop_text
+            # 区分 cond/uncond，不区分 text 内容。pred 的两个分支若传不同 text，第一
+            # 次 cache 了 A 的 text_embed，第二次取到的还是 A 的，导致 B 支路仍被喂错
+            # 误转写。关掉 cache 让每次都重算，代价是 pred 在启用 text_b 时从"开销翻倍"
+            # 变成"翻 2x + 文本编码开销"（文本编码在音频条件前，通常只占总开销 <5%）。
+            use_cache = not (
+                (dynamic_disable_cache and (mix_schedule is not None))
+                or (mix_on == "pred" and text_b is not None)
+            )
 
             if mix_on == "cond":
                 # 只做一次 forward：便宜
@@ -532,18 +556,19 @@ class CFM(nn.Module):
                 return pred + (pred - null_pred) * cfg_strength
 
             elif mix_on == "pred":
-                # 更“强”的方式：分别用 cond_a / cond_b 算 pred，再按 a(t) 混 pred
-                # 代价：每个 step 多一次 transformer forward
-                a = alpha_of_t(t).to(cond_a.dtype)
+                # 注意 mix_method 对 pred 不适用：速度场是切空间中的向量，
+                # slerp（球面插值）与 log（几何平均）对它没有明确几何意义，
+                # flow matching 的速度场本身线性可加，故此处恒为线性混合。
+                a = combined_alpha(t).to(cond_a.dtype)
 
-                def guided_pred(step_cond_local):
+                def guided_pred(step_cond_local, text_local):
                     if cfg_strength < 1e-5:
                         return self.transformer(
-                            x=x, cond=step_cond_local, text=text, time=t, mask=mask,
+                            x=x, cond=step_cond_local, text=text_local, time=t, mask=mask,
                             drop_audio_cond=False, drop_text=False, cache=use_cache
                         )
                     pred_cfg = self.transformer(
-                        x=x, cond=step_cond_local, text=text, time=t, mask=mask,
+                        x=x, cond=step_cond_local, text=text_local, time=t, mask=mask,
                         cfg_infer=True, cache=use_cache
                     )
                     p, n = torch.chunk(pred_cfg, 2, dim=0)
@@ -552,13 +577,19 @@ class CFM(nn.Module):
                 step_a = torch.where(cond_mask, cond_a, torch.zeros_like(cond_a))
                 step_b = torch.where(cond_mask, cond_b, torch.zeros_like(cond_b))
 
-                pa = guided_pred(step_a)
-                pb = guided_pred(step_b)
+                pa = guided_pred(step_a, text)
+                pb = guided_pred(step_b, text_b if text_b is not None else text)
 
                 return a * pa + (1 - a) * pb
 
             else:
-                raise ValueError(f"unknown mix_on: {mix_on}")
+                # "output" 模式不在此处实现：它需要跑两次完整推理再在 mel 域
+                # DTW 对齐后混合，由 utils_infer._infer_output_mode 拦截处理，
+                # 不会走到这里。到这里说明调用方绕过了 infer 层。
+                raise ValueError(
+                    f"unknown mix_on: {mix_on}, expected 'cond' or 'pred' "
+                    f"('output' is handled in utils_infer, not CFM.sample)"
+                )
 
         # noise input
         # to make sure batch inference result is same with different batch size, and for sure single inference

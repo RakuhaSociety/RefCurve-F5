@@ -101,6 +101,7 @@ async def infer_endpoint(
     cfg: float = Form(2.0),
     sway_coef: float = Form(-1.0),
     speed: float = Form(1.0),
+    mix_on: str = Form("cond"),
     mix_method: str = Form("lerp"),
     mix_schedule: str = Form("linear"),
     log_blend_mode: str = Form("logmel"),
@@ -124,6 +125,10 @@ async def infer_endpoint(
     speed = max(0.1, min(float(speed), 3.0))
     cfg = max(0.0, min(float(cfg), 10.0))
     sway_coef = max(-10.0, min(float(sway_coef), 10.0))
+
+    # 白名单 mix_on，默认 cond
+    if mix_on not in ("cond", "pred", "output"):
+        mix_on = "cond"
 
     ref_a_path = save_upload_tmp(ref_a)
     tmp_wav = None
@@ -175,6 +180,7 @@ async def infer_endpoint(
             device=device,
             allow_extrapolation=allow_extrapolation,
             seed=seed,
+            mix_on=mix_on,
             mix_method=mix_method,
             mix_schedule=mix_schedule,
             log_blend_mode=log_blend_mode,

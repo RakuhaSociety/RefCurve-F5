@@ -28,6 +28,7 @@ from pydub import AudioSegment, silence
 from vocos import Vocos
 
 from f5_tts.model import CFM
+from f5_tts.model.cfm import log_domain_blend, slerp_with_norm
 from f5_tts.model.utils import convert_char_to_pinyin, get_tokenizer
 
 
@@ -66,7 +67,129 @@ fix_duration = None
 # -----------------------------------------
 
 
-# chunk text into smaller pieces
+# ============================================================
+# mix_on="output" 专用：mel 域 DTW 对齐
+#
+# 背景：cond / pred 两种模式都把两条参考的特征按"帧号"直接对位混合，
+# 但两条参考念的内容不同、语速不同，第 k 帧的音素并不对应。更关键的是
+# CFM.sample() 只接受一条 text，所以另一条参考的音素序列从未进入模型，
+# 混出的 mel 与文本条件自相矛盾。
+#
+# output 模式改为：两条参考各自独立完成一次单参考推理（各自的 mel 与
+# 各自的文本完全自洽），再把两段"念同一句话"的结果做 DTW 对齐后混合。
+# 对齐基准不是 A 也不是 B，而是按 alpha 插值出的中间时间轴，这样节奏
+# 本身也参与混合，而不是把 B 的韵律抹平到 A 上。
+# ============================================================
+
+
+def _mel_dtw_path(mel_a, mel_b):
+    """
+    在 mel 域上计算 A、B 的 DTW 对齐路径。
+
+    mel_a: [T_a, C]，mel_b: [T_b, C]，均为 np.ndarray（float32/64）
+    返回 (idx_a, idx_b)：两个等长 np.ndarray，路径按时间递增排序。
+
+    用余弦距离而非欧氏：mel 的整体能量差（响度/说话人差异）会主导欧氏距离，
+    而我们要对齐的是频谱形状（音素身份），余弦对能量缩放不敏感。
+
+    注：曾试过限制步长斜率为 (1,1)/(1,2)/(2,1) 来消除"冻结段"（默认步集允许一侧连续
+    停住，实测 B 曾冻结 98 步 ≈ 1 秒）。冻结段确实消失了，但真实音频的字数反而变差 ——
+    说明冻结只是症状：两段独立生成的 mel 逐帧余弦相似度本就只有 0.23（中心化后），
+    10 分位为负，即"被判为同一音素"的帧对常常毫不相似。强行限制斜率只是把错误的
+    对齐摊得更均匀。根因是 mel 帧级特征不足以跨说话人定位音素，故保留默认步集。
+    """
+    import librosa
+
+    # librosa.sequence.dtw 期望 [C, T]，且对特征做转置后按列比较
+    x = np.asarray(mel_a, dtype=np.float64).T  # [C, T_a]
+    y = np.asarray(mel_b, dtype=np.float64).T  # [C, T_b]
+
+    # 退化情形：任一侧过短，无法对齐，退回线性映射
+    if x.shape[1] < 2 or y.shape[1] < 2:
+        n = max(x.shape[1], y.shape[1])
+        idx_a = np.linspace(0, x.shape[1] - 1, n).round().astype(np.int64)
+        idx_b = np.linspace(0, y.shape[1] - 1, n).round().astype(np.int64)
+        return idx_a, idx_b
+
+    _, wp = librosa.sequence.dtw(X=x, Y=y, metric="cosine")
+    # librosa 返回的 wp 是从终点回溯的，倒序即为时间递增
+    wp = wp[::-1]
+    return wp[:, 0].astype(np.int64), wp[:, 1].astype(np.int64)
+
+
+def _dtw_common_timeline(mel_a, mel_b, alpha):
+    """
+    构造一条"中间时间轴"，并给出 A、B 各自到它的采样位置。
+
+    alpha=1.0 → 时间轴完全等于 A 的节奏；alpha=0.0 → 完全等于 B 的节奏；
+    中间值则按比例插值，于是节奏本身也随 alpha 连续变化。
+
+    返回 (pos_a, pos_b, n_out)：
+      pos_a / pos_b 是 float 数组，长度 n_out，表示输出第 k 帧应从
+      A / B 的哪个（可能是小数的）帧位置采样。
+
+    ✅ 关键不变式：pos_a[k] 与 pos_b[k] 必须是 DTW 路径上的同一点，否则输出第 k 帧
+    会把 A 的某个音素位置和 B 的另一个音素位置叠加起来 —— 听感就是叠音/回声。
+    旧实现分别对两侧的采样位置做 alpha 插值（pos_a = α·ia + (1-α)·ia_from_b，
+    pos_b 同理），只有当 warp 是仿射时才满足该不变式；语音的 warp 是分段非线性的，
+    f(中点) ≠ 中点(f)，于是中间 alpha 处配对崩坏。实测注入"完全正确"的对齐路径后，
+    残差仍在 alpha=0.5 达到峰值（配对误差 2.4 帧 ≈ 26ms），两端却几乎为 0，
+    与"极端权重干净、50/50 叠音"的听感完全吻合。
+
+    现在改为沿路径参数化：alpha 只决定"沿路径推进的时钟快慢"（即最终节奏偏向谁），
+    两侧位置恒取自同一路径点，配对由构造保证。
+    """
+    idx_a, idx_b = _mel_dtw_path(mel_a, mel_b)
+
+    t_a = int(mel_a.shape[0])
+    t_b = int(mel_b.shape[0])
+
+    pa = idx_a.astype(np.float64)
+    pb = idx_b.astype(np.float64)
+
+    # 混合时钟：沿路径单调推进。alpha=1 按 A 的帧号计时，alpha=0 按 B 的。
+    clock = np.maximum.accumulate(alpha * pa + (1.0 - alpha) * pb)
+
+    # 路径含水平/垂直段（一对多），同一时钟值对应多个路径点。按时钟值分组取均值
+    # 聚合，既让 np.interp 的横轴严格单调，也保留了旧实现在两端的均值语义
+    # （alpha=0 时 B 的每帧对上的是所有匹配 A 帧的平均，而非第一个）。
+    uniq, inv = np.unique(clock, return_inverse=True)
+    if uniq.size < 2:
+        # 退化：整条路径压成一个时钟点（两侧都极短），退回线性映射
+        n_out = max(2, max(t_a, t_b))
+        pos_a = np.linspace(0.0, t_a - 1, n_out)
+        pos_b = np.linspace(0.0, t_b - 1, n_out)
+        return pos_a, pos_b, n_out
+
+    cnt = np.bincount(inv).astype(np.float64)
+    pa_u = np.maximum.accumulate(np.bincount(inv, weights=pa) / cnt)
+    pb_u = np.maximum.accumulate(np.bincount(inv, weights=pb) / cnt)
+
+    # 输出长度：A、B 时长按 alpha 插值，节奏随之伸缩
+    n_out = int(round(alpha * t_a + (1.0 - alpha) * t_b))
+    n_out = max(2, min(n_out, max(t_a, t_b) * 2))
+
+    # 沿时钟均匀取 n_out 个点，两侧位置来自同一路径点
+    cs = np.linspace(uniq[0], uniq[-1], n_out, dtype=np.float64)
+    pos_a = np.clip(np.interp(cs, uniq, pa_u), 0.0, t_a - 1)
+    pos_b = np.clip(np.interp(cs, uniq, pb_u), 0.0, t_b - 1)
+    return pos_a, pos_b, n_out
+
+
+def _resample_mel(mel, pos):
+    """
+    按（小数）帧位置 pos 线性重采样 mel。
+
+    mel: [T, C] np.ndarray；pos: [n_out] float
+    返回 [n_out, C]。逐通道 np.interp 比构造稀疏矩阵更直接，
+    n_out 量级在千帧、C=100，开销可忽略。
+    """
+    mel = np.asarray(mel, dtype=np.float64)
+    grid = np.arange(mel.shape[0], dtype=np.float64)
+    out = np.empty((pos.shape[0], mel.shape[1]), dtype=np.float64)
+    for c in range(mel.shape[1]):
+        out[:, c] = np.interp(pos, grid, mel[:, c])
+    return out
 
 
 def chunk_text(text, max_chars=135):
@@ -401,7 +524,7 @@ def infer_process(
     device=device,
     allow_extrapolation=False,
     seed=None,
-    # ========== 改造版：第二参考（关键字可选，不传则退化为单参考） ==========
+    # ========== 改造版：第二/三参考（关键字可选，不传则退化为单参考） ==========
     # 放在签名末尾，避免挤占上游的位置参数顺序
     ref_audio_2=None,
     ref_text_2="",
@@ -422,17 +545,35 @@ def infer_process(
     # Split the input text into batches
     audio_a, sr_a = torchaudio.load(ref_audio)
 
-    if ref_audio_2 is None:
-        # 单参考模式：退化为原版行为，第二参考复用第一参考
-        audio_b, sr_b = audio_a.clone(), sr_a
+    single_ref = ref_audio_2 is None
+    if single_ref:
+        # 单参考模式：不要在这里把 A 克隆成 B。克隆会让下游 cond_b 非 None，
+        # 使 CFM 的 single_ref 快捷路径失效，从而走完整混合路径（A 与 A 混合）：
+        # cond 模式下 slerp/log 引入数值误差，pred 模式下变成两次独立 forward，
+        # 结果都会偏离上游单参考基线。这里保持 None 原样传下去。
+        audio_b, sr_b = None, None
         ref_text_2 = ref_text
     else:
         audio_b, sr_b = torchaudio.load(ref_audio_2)
 
-    ref_secs = max(audio_a.shape[-1] / sr_a, audio_b.shape[-1] / sr_b)
-    ref_chars = max(len(ref_text.encode("utf-8")), len(ref_text_2.encode("utf-8")))
+    if mix_on == "output" and not single_ref:
+        # output 模式两条支路各自独立推理，但必须共用同一套分块才能逐块对齐。
+        # 各自算一次 max_chars 取较小者：用较宽松的那个会让短参考那一支超出
+        # 它自己的 30 秒生成上限，导致两支路块数虽同、内容却被截断错位。
+        secs_a = audio_a.shape[-1] / sr_a
+        secs_b = audio_b.shape[-1] / sr_b
+        chars_a = max(1, len(ref_text.encode("utf-8")))
+        chars_b = max(1, len(ref_text_2.encode("utf-8")))
+        max_chars = min(
+            int(chars_a / secs_a * (22 - secs_a) * speed),
+            int(chars_b / secs_b * (22 - secs_b) * speed),
+        )
+        max_chars = max(1, max_chars)
+    else:
+        ref_secs = audio_a.shape[-1] / sr_a if single_ref else max(audio_a.shape[-1] / sr_a, audio_b.shape[-1] / sr_b)
+        ref_chars = max(len(ref_text.encode("utf-8")), len(ref_text_2.encode("utf-8")))
 
-    max_chars = int(ref_chars / ref_secs * (22 - ref_secs) * speed)
+        max_chars = int(ref_chars / ref_secs * (22 - ref_secs) * speed)
 
     gen_text_batches = chunk_text(gen_text, max_chars=max_chars)
     for i, gen_text_i in enumerate(gen_text_batches):
@@ -465,10 +606,10 @@ def infer_process(
             allow_extrapolation=allow_extrapolation,
             seed=seed,
             
-            # ✅新增：第二参考传下去
-            ref_audio_2=(audio_b, sr_b),
+            # ✅新增：第二参考传下去（单参考时保持 None，触发下游 single_ref 快捷路径）
+            ref_audio_2=None if single_ref else (audio_b, sr_b),
             ref_text_2=ref_text_2,
-            
+
             # ✅阶段一 & 阶段二：混合控制参数
             mix_on=mix_on,
             mix_method=mix_method,
@@ -527,16 +668,25 @@ def infer_batch_process(
     n_a_end=None,
 ):
     # ----------------------------
-    # 0) unpack & prepare 2 audios
+    # 0) unpack & prepare 2 or 3 audios
     # ----------------------------
     audio_a, sr_a = ref_audio
 
-    if ref_audio_2 is None:
+    # 单参考时仍克隆一份 B 供 _prep_audio / duration 估计复用，但传给 model.sample
+    # 时必须还原为 None，否则 CFM 的 single_ref 快捷路径失效（详见下方 cond_b=）。
+    single_ref = ref_audio_2 is None
+    if single_ref:
         audio_b, sr_b = audio_a.clone(), sr_a
+        # 单参考时没有可混合的第二路，output 模式无意义：降级为 cond 走上游基线路径。
+        # 不降级的话 mix_on="output" 会原样传到 CFM.sample() 并触发那里的校验报错。
+        if mix_on == "output":
+            mix_on = "cond"
     else:
         audio_b, sr_b = ref_audio_2
 
     def _prep_audio(audio, sr):
+        if audio is None:
+            return None, None
         # mono
         if audio.shape[0] > 1:
             audio = torch.mean(audio, dim=0, keepdim=True)
@@ -574,6 +724,13 @@ def infer_batch_process(
     ref_text = _ensure_end_punc(ref_text)
     ref_text_2 = _ensure_end_punc(ref_text_2)
 
+    def _finalize_prompt(t: str) -> str:
+        t = t.strip()
+        # 和原版一致：如果最后一个字符是 ascii（len==1），补个空格
+        if t and len(t[-1].encode("utf-8")) == 1:
+            t = t + " "
+        return t
+
     # 根据 mix_a_start 权重决定用哪个文本作为 prompt
     # 这样交换 A/B 并交换权重时，选中的文本也会相应切换，保持对称
     if mix_a_start >= 0.5:
@@ -581,9 +738,18 @@ def infer_batch_process(
     else:
         prompt_text = ref_text_2.strip()  # B 权重更大，用 B 的文本
 
-    # 和原版一致：如果最后一个字符是 ascii（len==1），补个空格
-    if prompt_text and len(prompt_text[-1].encode("utf-8")) == 1:
-        prompt_text = prompt_text + " "
+    prompt_text = _finalize_prompt(prompt_text)
+
+    # output 模式下两条参考各跑一次独立推理，各自使用自己的文本，
+    # 不再二选一——这正是该模式相对 cond/pred 的核心优势。
+    prompt_text_a = _finalize_prompt(ref_text)
+    prompt_text_b = _finalize_prompt(ref_text_2)
+
+    # ✅ pred 模式也需要各自的文本：它每步分别用 cond_a/cond_b 各跑一次 forward，
+    # 两次若喂同一条文本，B 支路就是"B 的音频 + A 的转写"——文本描述的不是它
+    # 自己的参考。之前按 mix_a_start >= 0.5 二选一，导致 alpha 在 0.49/0.51 跨过
+    # 阈值时整个 prompt 硬跳变、B 支路被喂错误转写。
+    # cond 模式仍二选一（只有一个文本序列），所以 prompt_text 仍留着。
 
     generated_waves = []
     spectrograms = []
@@ -592,7 +758,7 @@ def infer_batch_process(
     # 2) per-batch inference
     # ----------------------------
     # 上游修复：把 fix_duration 按各分块文本长度分摊，避免每块都用整句时长导致 N 倍膨胀
-    # 改造版：参考时长取两段参考的较大值（与下面 union prompt 的裁剪保持一致）
+    # 改造版：参考时长取两段（或三段）参考的较大值（与下面 union prompt 的裁剪保持一致）
     if fix_duration is not None and len(gen_text_batches) > 1:
         ref_audio_len_frames = max(audio_a.shape[-1], audio_b.shape[-1]) // hop_length
         ref_sec = ref_audio_len_frames * hop_length / target_sample_rate
@@ -604,7 +770,125 @@ def infer_batch_process(
     else:
         fix_durations = [fix_duration] * len(gen_text_batches)
 
+    def _local_speed_of(gen_text):
+        return 0.3 if len(gen_text.encode("utf-8")) < 10 else speed
+
+    def _infer_one_ref(audio, ref_txt, prompt_txt, gen_text, fix_dur):
+        """
+        output 模式的单支路：只用一条参考做一次纯单参考推理。
+
+        与 _infer_basic 的区别是 cond_b 恒为 None（走 CFM 的 single_ref 快捷路径），
+        且 duration / prompt 裁剪都基于这一条参考自己的长度，因此 mel 与文本
+        条件完全自洽，不存在两条参考音素叠加的问题。
+
+        返回切掉 prompt 前缀后的 mel：[T, C]，np.float64。
+        """
+        local_speed = _local_speed_of(gen_text)
+        text_list = [prompt_txt + gen_text] if prompt_txt else [gen_text]
+        final_text_list = convert_char_to_pinyin(text_list)
+
+        ref_audio_len = audio.shape[-1] // hop_length
+        if fix_dur is not None:
+            duration = int(fix_dur * target_sample_rate / hop_length)
+        else:
+            ref_text_len = max(1, len(ref_txt.encode("utf-8")))
+            gen_text_len = len(gen_text.encode("utf-8"))
+            duration = ref_audio_len + int(ref_audio_len / ref_text_len * gen_text_len / local_speed)
+
+        with torch.inference_mode():
+            generated, _ = model_obj.sample(
+                cond=audio,
+                cond_b=None,
+                text=final_text_list,
+                duration=duration,
+                steps=nfe_step,
+                cfg_strength=cfg_strength,
+                sway_sampling_coef=sway_sampling_coef,
+                seed=seed,
+                allow_extrapolation=allow_extrapolation,
+            )
+        generated = generated.to(torch.float32)[:, ref_audio_len:, :]  # 切掉自己的 prompt
+        return generated[0].cpu().numpy().astype(np.float64)
+
+    def _infer_output_mode(gen_text, fix_dur):
+        """
+        output 模式：两条参考各自独立生成同一段目标文本，DTW 对齐后在 mel 域混合。
+
+        对齐基准是按 alpha 插值出的中间时间轴（见 _dtw_common_timeline），
+        所以 alpha 不仅控制音色权重，也控制最终节奏偏向 A 还是 B。
+        """
+        mel_a = _infer_one_ref(audio_a, ref_text, prompt_text_a, gen_text, fix_dur)
+        mel_b = _infer_one_ref(audio_b, ref_text_2, prompt_text_b, gen_text, fix_dur)
+
+        # output 模式没有 ODE 时间轴可用，t 维度曲线在此无意义；
+        # 用 mix_a_start 作为标量权重（与 UI 的"A 权重"语义一致）。
+        alpha_scalar = float(mix_a_start)
+        # 时间轴插值需要 [0,1] 内的比例，即使允许外推也要夹紧，
+        # 否则 n_out 会算出负数或超长
+        alpha_time = min(1.0, max(0.0, alpha_scalar))
+
+        pos_a, pos_b, n_out = _dtw_common_timeline(mel_a, mel_b, alpha_time)
+        wa = _resample_mel(mel_a, pos_a)  # [n_out, C]
+        wb = _resample_mel(mel_b, pos_b)
+
+        ta = torch.from_numpy(wa).to(device=device, dtype=torch.float32)
+        tb = torch.from_numpy(wb).to(device=device, dtype=torch.float32)
+
+        # 帧级权重：仅当 n 维度曲线真正启用时才用它覆盖标量权重，
+        # 使"开头偏 A、结尾偏 B"这类控制在 output 模式下同样可用。
+        # 必须同时检查 n_schedule —— UI 的 n_a_start/n_a_end 是 Slider，恒有值，
+        # 只判非 None 会在曲线关闭时把权重钉死成 n_a_start，丢掉 mix_a_start。
+        if n_schedule is not None and n_a_start is not None and n_a_end is not None:
+            ratio = torch.linspace(0, 1, n_out, device=device, dtype=torch.float32)
+            if callable(n_schedule):
+                r01 = n_schedule(ratio)
+            elif n_schedule == "cosine":
+                r01 = 0.5 - 0.5 * torch.cos(torch.pi * ratio)
+            elif n_schedule == "sigmoid":
+                r01 = torch.sigmoid(12.0 * (ratio - 0.5))
+            else:
+                r01 = ratio
+            a = n_a_start * (1 - r01) + n_a_end * r01
+            if not allow_extrapolation:
+                a = a.clamp(0.0, 1.0)
+            a = a.view(-1, 1)
+        else:
+            a = torch.full((1, 1), alpha_scalar, device=device, dtype=torch.float32)
+            if not allow_extrapolation:
+                a = a.clamp(0.0, 1.0)
+
+        # 复用与 cond 模式相同的三种混合算法，语义保持一致
+        if mix_method == "lerp":
+            fused = a * ta + (1 - a) * tb
+        elif mix_method == "slerp":
+            fused = slerp_with_norm(ta.unsqueeze(0), tb.unsqueeze(0), a.unsqueeze(0)).squeeze(0)
+        elif mix_method == "log":
+            fused = log_domain_blend(ta.unsqueeze(0), tb.unsqueeze(0), a.unsqueeze(0), mode=log_blend_mode).squeeze(0)
+        else:
+            raise ValueError(f"unknown mix_method: {mix_method}, expected 'lerp', 'slerp', or 'log'")
+
+        generated = fused.unsqueeze(0).permute(0, 2, 1)  # [1, C, T] for vocoder
+        with torch.inference_mode():
+            if mel_spec_type == "vocos":
+                generated_wave = vocoder.decode(generated)
+            elif mel_spec_type == "bigvgan":
+                generated_wave = vocoder(generated)
+            else:
+                raise ValueError(f"Unknown mel_spec_type: {mel_spec_type}")
+
+        weighted_rms = alpha_time * rms_a + (1 - alpha_time) * rms_b
+        if weighted_rms < target_rms:
+            generated_wave = generated_wave * weighted_rms / target_rms
+
+        generated_wave = generated_wave.squeeze().cpu().numpy()
+        # 必须返回 [1, C, T]（与 _infer_basic 一致）：调用方取 [0] 后按 axis=1
+        # 拼接各块 mel，返回 [1, T, C] 会让多块拼接因频率维不匹配而报错。
+        return generated_wave, generated
+
     def _infer_basic(gen_text, fix_dur):
+        if mix_on == "output" and not single_ref:
+            return _infer_output_mode(gen_text, fix_dur)
+
         local_speed = speed
         if len(gen_text.encode("utf-8")) < 10:
             local_speed = 0.3
@@ -616,19 +900,59 @@ def infer_batch_process(
             text_list = [gen_text]
         final_text_list = convert_char_to_pinyin(text_list)
 
-        # union prompt length (frames) so we cut correctly
-        ref_len_a = audio_a.shape[-1] // hop_length
-        ref_len_b = audio_b.shape[-1] // hop_length
-        ref_audio_len = max(ref_len_a, ref_len_b)
+        # ✅ pred 模式需要 B 支路自己的文本列表（双参考时才有意义）
+        if mix_on == "pred" and not single_ref:
+            text_list_b = [prompt_text_b + gen_text] if prompt_text_b else [gen_text]
+            final_text_list_b = convert_char_to_pinyin(text_list_b)
+        else:
+            final_text_list_b = None
+
+        # duration 必须留出 "并集 prompt 长度 + 生成空间"。CFM 里 cond_mask 是
+        # mask_a | mask_b（或 mask_a | mask_b | mask_c），即 prompt 区域恒为参考
+        # 的较长者；而每字帧数只能按主参考（A，也就是 prompt_text 的来源）估。
+        # 两者混用会出两种事故：
+        #   · 生成空间不足：B 主导且 B 远短于 A 时，按 B 的帧/字比估出的总长
+        #     还不到并集长度，被 CFM 的 duration 下限抬平后只剩 1 帧可生成，
+        #     输出被截断（"吞字"）。
+        #   · 曾经这里把 ref_audio_len 直接取 max 来回避上一条，但那让模型以为
+        #     前 max 帧都对应 A 的文本，于是在输出开头复述另一条参考的尾部
+        #     （听感即"开头多了一截别的内容"）。
+        # 解决方案：ref_len_union 取并集（与 cond_mask 一致，与下面 prompt 裁剪一致），
+        # 但 pace 要按 prompt_text 实际所属的那条参考（见上面按 mix_a_start
+        # 选文本的分支）。写死成 A 会在 prompt_text 来自 B 时用 A 的语速去估
+        # B 的文本，估短了就没有生成空间。
+        len_a = audio_a.shape[-1] // hop_length
+        len_b = audio_b.shape[-1] // hop_length
+        ref_len_union = max(len_a, len_b)
+
+        # 帧/字比必须取自 prompt_text 实际所属的那条参考（见上面按 mix_a_start
+        # 选文本的分支）。写死成 A 会在 prompt_text 来自 B 时用 A 的语速去估
+        # B 的文本，估短了就没有生成空间。
+        if mix_a_start >= 0.5:
+            pace_frames, pace_text = len_a, ref_text
+        else:
+            pace_frames, pace_text = len_b, ref_text_2
+
+        # 两条参考语速可能差近一倍。只按被选中那条估，遇到快语速参考
+        # 会把生成区压得装不下目标文本（听感是开头整段缺失）。取所有参考中较慢的
+        # 作下限：宁可多留静音（后面 remove_silence 可清），也不要截掉内容。
+        def _pace(frames, text):
+            return frames / max(1, len(text.encode("utf-8")))
+
+        pace_ratio = max(_pace(pace_frames, pace_text), _pace(len_a, ref_text), _pace(len_b, ref_text_2))
 
         # 上游修复：用分摊后的 fix_dur，而非整句 fix_duration
         if fix_dur is not None:
             duration = int(fix_dur * target_sample_rate / hop_length)
         else:
-            # duration estimation uses the longer of the two reference texts to avoid underestimating
-            ref_text_len = max(1, len(ref_text.encode("utf-8")), len(ref_text_2.encode("utf-8")))
             gen_text_len = len(gen_text.encode("utf-8"))
-            duration = ref_audio_len + int(ref_audio_len / ref_text_len * gen_text_len / local_speed)
+            gen_frames = int(pace_ratio * gen_text_len / local_speed)
+            duration = ref_len_union + gen_frames
+
+        # 下面切 prompt 用并集长度：CFM 的 cond_mask 是 mask_a | mask_b，实际被
+        # prompt 占用的就是这一段。用 A 自己的长度会把较长那条参考的尾部留在
+        # 输出开头（听感即"开头多了一截别的内容"）。
+        ref_audio_len = ref_len_union
 
         with torch.inference_mode():
             local_mix_2d = mix_2d_weights
@@ -638,8 +962,11 @@ def infer_batch_process(
 
             generated, _ = model_obj.sample(
                 cond=audio_a,
-                cond_b=audio_b,  # ✅第二参考音频
+                # ✅第二参考音频；单参考时传 None 以触发 CFM 的 single_ref 快捷路径，
+                # 保证结果与上游逐位一致（传 audio_a 的克隆会走完整混合路径）
+                cond_b=None if single_ref else audio_b,
                 text=final_text_list,
+                text_b=final_text_list_b,  # ✅ pred 模式：B 支路自己的文本
                 duration=duration,
                 steps=nfe_step,
                 cfg_strength=cfg_strength,

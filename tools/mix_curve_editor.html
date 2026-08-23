@@ -59,6 +59,13 @@
     <h3>Backend Inference (FastAPI)</h3>
     <div class="toolbar">
       <label>Server URL: <input id="serverUrl" type="text" value="http://localhost:8002/infer" style="width:260px;" /></label>
+      <label>mix_on:
+        <select id="mixOn">
+          <option value="cond">cond</option>
+          <option value="pred">pred</option>
+          <option value="output">output</option>
+        </select>
+      </label>
       <label>mix_method:
         <select id="mixMethod">
           <option value="lerp">lerp</option>
@@ -127,6 +134,7 @@
     const swayInput = document.getElementById('sway');
     const speedInput = document.getElementById('speed');
     const seedInput = document.getElementById('seed');
+    const mixOn = document.getElementById('mixOn');
     const mixMethod = document.getElementById('mixMethod');
     const mixSchedule = document.getElementById('mixSchedule');
     const mix2dMode = document.getElementById('mix2dMode');
@@ -436,6 +444,7 @@
       fd.append('sway_coef', swayInput.value || '-1.0');
       fd.append('speed', speedInput.value || '1.0');
       if(seedInput.value) fd.append('seed', seedInput.value);
+      fd.append('mix_on', mixOn.value);
       fd.append('mix_method', mixMethod.value);
       fd.append('mix_schedule', mixSchedule.value);
       fd.append('mix_a_start', mixStart.toString());

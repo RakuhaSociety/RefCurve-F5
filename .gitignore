@@ -6,11 +6,19 @@ data/
 ckpts/
 wandb/
 results/
+tmp_sw/
 
 # 改造版：本地便携环境与大文件，不入库
 f5-tts_env/
 .huggingface/
 *.whl
+
+# 音频文件：示例音频不入库（版权未授权）
+*.wav
+*.mp3
+*.flac
+*.ogg
+*.m4a
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
