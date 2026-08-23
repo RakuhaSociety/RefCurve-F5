@@ -18,38 +18,32 @@
 
 > 让 A 和 B 之间**某个可精确控制的插值点**上的声音说这句话。
 
-三项能力：
+两项核心能力：
 
 | 能力 | 说明 |
 | --- | --- |
-| **双参考混合** | 同时输入参考 A、B，在扩散采样的每一步融合两者的 mel 条件 |
+| **双参考混合** | 同时输入参考 A、B，在扩散采样的每一步融合两者的速度场（pred 模式）或 mel 条件（cond 模式） |
 | **曲线控制** | 权重不是一个常数，而是沿**时间维度 t**（扩散步）和**帧位置维度 n**（音频时间轴）变化的曲线 |
-| **情绪迁移** | 给定 A(平静)、B(激动)、C(目标音色)，把 `B-A` 的情绪差分迁移到 C 上 |
 
 关键点：混合发生在 **ODE 采样循环内部**，不是把两段音频在波形层面叠加。
 
+### pred 模式（推荐）
+
 ```
-参考 A ─┐
-        ├─→ mel → cond_a ─┐
-参考 B ─┘                  ├─ 每个 ODE 步按 α 融合 → Transformer → mel → vocoder → 音频
-             mel → cond_b ─┘
-                            ↑
-                     α = f(t, n) 由曲线决定
+参考 A ─→ mel → cond_a ─→ Transformer_A ─→ v_a ─┐
+                                                    ├─ α·v_a + (1-α)·v_b → ODE step → mel → 音频
+参考 B ─→ mel → cond_b ─→ Transformer_B ─→ v_b ─┘
+                                                ↑
+                                        α = f(t, n) 由曲线决定
 ```
 
-## 效果演示
+每个 ODE 步对两个速度场加权平均，B 支路使用自己的参考文本，避免文本不匹配导致的生成跳变。
 
-同一段参考音频、同样的生成文本，只改混合参数：
+### cond 模式（快速尝试）
 
-| 样例 | 参数 | 文件 |
-| --- | --- | --- |
-| 参考 A（温柔） | — | [`samples/ref_A_yasashi.wav`](samples/ref_A_yasashi.wav) |
-| 参考 B（平常） | — | [`samples/ref_B_normal.wav`](samples/ref_B_normal.wav) |
-| 单参考（等同原版 F5） | 只用 A | [`samples/01_single_ref.wav`](samples/01_single_ref.wav) |
-| 双参考混合 | `slerp` + `cosine`，A 权重 0.9→0.3 | [`samples/02_mix_slerp_cosine.wav`](samples/02_mix_slerp_cosine.wav) |
-| 2D + 权重外推 | `multiply`，n 维度 1.2→-0.2，开启外推 | [`samples/03_mix_2d_extrapolation.wav`](samples/03_mix_2d_extrapolation.wav) |
+先把两段参考的 mel 条件按 α 融合，再走单次 forward。开销比 pred 模式低一半，但混合效果不如 pred 稳定。
 
-> wav 文件需下载后播放，GitHub 不支持在 README 内嵌音频。
+---
 
 ## 快速开始
 
@@ -69,15 +63,15 @@ pip install -e .
 pip install funasr modelscope   # 可选：中文自动转写
 ```
 
-### 启动
+### 启动 Gradio 界面
 
 ```bash
 python src/f5_tts/infer/gradio_mix_demo.py
 ```
 
-Windows 用户若使用便携环境，可直接双击 `启动特征混合试验台.bat`（内含 CUDA 路径与 HF 镜像配置）。
+Windows 用户若使用便携环境，可直接双击 `启动特征混合试验台.bat`。
 
-界面含两个标签页：**双参考混合** 和 **三参考情绪迁移**。
+界面含一个标签页：**双参考混合**，支持 cond / pred 两种模式及所有曲线参数。
 
 ### 命令行
 
@@ -86,7 +80,8 @@ f5-tts_infer-cli \
   --ref_audio "A.wav"   --ref_text   "A的转写" \
   --ref_audio_2 "B.wav" --ref_text_2 "B的转写" \
   --gen_text "要合成的文本" \
-  --mix_method slerp --mix_schedule cosine \
+  --mix_on pred \
+  --mix_method lerp --mix_schedule cosine \
   --mix_a_start 0.9 --mix_a_end 0.3
 ```
 
@@ -102,12 +97,22 @@ wav, sr, _ = infer_process(
     gen_text="要合成的文本",
     model_obj=model, vocoder=vocoder,
     ref_audio_2="B.wav", ref_text_2="B的转写",   # 省略即单参考
-    mix_method="slerp", mix_schedule="cosine",
+    mix_on="pred",                                # 推荐；或 "cond" 快速尝试
+    mix_method="lerp", mix_schedule="cosine",
     mix_a_start=0.9, mix_a_end=0.3,
 )
 ```
 
+---
+
 ## 混合参数
+
+### 混合模式 `mix_on`
+
+| 值 | 说明 | 开销 |
+| --- | --- | --- |
+| `pred`（推荐） | 每步各跑一次 forward，在速度场空间加权 | 2× |
+| `cond` | 先融合 mel 条件再跑一次 forward | 1× |
 
 ### 混合算法 `mix_method`
 
@@ -116,6 +121,8 @@ wav, sr, _ = infer_process(
 | `lerp` | 线性插值 | 通用，稳妥的起点 |
 | `slerp` | 方向用球面插值 + 幅度用线性插值 | 音色类方向性特征，过渡更平滑 |
 | `log` | 对数域几何平均 | 能量类信号，保持乘性特性 |
+
+> `mix_method` 仅对 `cond` 模式有效；`pred` 模式的速度场天然线性可加，恒为 lerp。
 
 ### 权重曲线
 
@@ -144,6 +151,8 @@ wav, sr, _ = infer_process(
 
 `2d_grid` 可配合网页版曲线编辑器（`tools/mix_curve_editor.html` + `tools/mix_curve_server.py`，FastAPI 后端监听 8002）手绘权重网格。
 
+Windows 用户可直接双击 `启动曲线混合后端.bat` 启动后端。
+
 ### 权重外推 `allow_extrapolation`
 
 默认权重被 clamp 到 `[0,1]`。开启后允许越界：
@@ -153,30 +162,17 @@ wav, sr, _ = infer_process(
 
 > 若发现调了参数却"没效果"，先检查是不是没开这个开关被静默 clamp 了。
 
-## 三参考情绪迁移
-
-给定三段音频，构造差分后走双参考路径：
-
-```
-A = 情绪基准（如某人平静时）
-B = 情绪目标（同一人激动时）
-C = 声线基底（目标说话人）
-
-→ C + diff_scale × (B - A)
-```
-
-`diff_scale` 界面范围 0.0–2.0，常用 0.5–1.5。配合负权重 + 开启外推可做情绪反向。
+---
 
 ## 与上游 F5-TTS 的区别
 
 | 方面 | 上游 F5-TTS | RefCurve-F5 |
 | --- | --- | --- |
-| 参考音频 | 单段 | 单段或多段，带曲线控制 |
-| 混合时机 | — | ODE 采样循环内部融合 mel 条件 |
-| 情绪迁移 | — | 三参考差分迁移 |
+| 参考音频 | 单段 | 单段或双段，带曲线控制 |
+| 混合时机 | — | ODE 采样循环内部融合（pred：速度场；cond：mel 条件） |
 | 模型加载 | HF 自动下载 | 本地 `ckpts/` 优先 |
 | 中文 ASR | Whisper | FunASR Paraformer（不依赖 FFmpeg） |
-| 界面 | 标准 Gradio | 额外的混合试验台 + 网页曲线编辑器 |
+| 界面 | 标准 Gradio | 双参考混合试验台 + 网页曲线编辑器 |
 
 **权重完全兼容**：改造只发生在推理时，不涉及网络结构与训练。上游发布的 checkpoint 可直接使用。
 
@@ -184,23 +180,28 @@ C = 声线基底（目标说话人）
 
 当前基线：上游 **v1.1.22**（2026-07）。
 
+---
+
 ## 已知限制
 
-- **声码器本地路径硬编码**：`infer_cli.py` 中写死为 `../checkpoints/vocos-mel-24khz`，与实际的 `ckpts/` 不符，且未开放为命令行参数。使用 CLI 时若走本地声码器会失败（此问题继承自上游）。
-- **`--ref_audio_2` 默认值**指向不存在的 `basic_ref_en_2.wav`，不显式传第二参考且不用 toml 时会失败。
-- **`mix_on` 参数**（融合作用于条件 or 预测速度场）仅存在于 `CFM.sample()`，未从上层透传，实际恒为 `cond`。
+- **声码器本地路径**：`infer_cli.py` 中 vocoder 路径可能需要手动确认指向 `ckpts/vocos-mel-24khz`，视安装方式而定。
+- **示例音频**：`examples/basic/` 目录下仅保留 `basic.toml` 配置模板，不含参考音频；请自行准备并填写路径。
 - 无自动化测试。
+
+---
 
 ## 路线图
 
-- [x] 双参考混合（lerp / slerp / log）
+- [x] 双参考混合（lerp / slerp / log，cond 模式）
 - [x] t + n 双维度曲线控制、2D 组合模式、权重外推
-- [x] 三参考情绪迁移
 - [x] 网页版曲线编辑器
-- [ ] **基于反向传播的混合模式** — 当前混合是前向的确定性融合；另一种设计是通过梯度优化求解混合参数，尚未实现
+- [x] pred 模式：速度场空间加权，per-branch 文本修复
+- [ ] **统计均值情绪迁移** — 收集 N 对同角色不同情绪的成对音频，离线提取速度场差的均值，推理时直接注入（无需改模型，比单对差分稳定）
 - [ ] `RefCurve-SoVITS` — 将方法移植到 [GPT-SoVITS](https://github.com/RVC-Boss/GPT-SoVITS)
 
 > RefCurve 的思路不绑定 F5-TTS，原则上可移植到任何以参考音频为条件的 TTS 系统。
+
+---
 
 ## 致谢与许可
 
