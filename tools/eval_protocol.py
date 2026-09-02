@@ -44,6 +44,7 @@ EXAMPLE_MANIFEST = {
 _emo = None
 _spk = None
 _asr = None
+_embedding_cache = {}
 
 
 def emo_model():
@@ -67,28 +68,44 @@ def spk_model():
 def asr_model():
     global _asr
     if _asr is None:
-        import whisper
+        try:
+            from faster_whisper import WhisperModel
+        except ImportError as exc:
+            raise RuntimeError("日文评测 ASR 需要 faster-whisper；请安装项目的 eval 可选依赖") from exc
 
-        _asr = whisper.load_model("large-v3")
+        _asr = WhisperModel("large-v3", device="auto", compute_type="default")
     return _asr
 
 
 # ---------------- 指标 ----------------
 
 
+def _to_numpy(value):
+    """将 FunASR 可能返回的 GPU Tensor / ndarray 统一转成 CPU numpy。"""
+    if hasattr(value, "detach"):
+        value = value.detach().cpu().numpy()
+    return value
+
+
 def emotion_embedding(wav_path: str):
     """emotion2vec utterance 级 embedding（数值向量）。"""
     import numpy as np
 
-    res = emo_model().generate(wav_path, granularity="utterance", extract_embedding=True)
-    return np.asarray(res[0]["feats"], dtype="float32")
+    key = ("emotion", str(Path(wav_path).resolve()))
+    if key not in _embedding_cache:
+        res = emo_model().generate(wav_path, granularity="utterance", extract_embedding=True)
+        _embedding_cache[key] = np.asarray(_to_numpy(res[0]["feats"]), dtype="float32")
+    return _embedding_cache[key]
 
 
 def speaker_embedding(wav_path: str):
     import numpy as np
 
-    res = spk_model().generate(wav_path)
-    return np.asarray(res[0]["spk_embedding"], dtype="float32").squeeze()
+    key = ("speaker", str(Path(wav_path).resolve()))
+    if key not in _embedding_cache:
+        res = spk_model().generate(wav_path)
+        _embedding_cache[key] = np.asarray(_to_numpy(res[0]["spk_embedding"]), dtype="float32").squeeze()
+    return _embedding_cache[key]
 
 
 def cosine(a, b) -> float:
@@ -100,18 +117,103 @@ def cosine(a, b) -> float:
 
 
 def transcribe_ja(wav_path: str) -> str:
-    res = asr_model().transcribe(wav_path, language="ja")
-    return res["text"].strip()
+    """日文 ASR。优先 Visual-novel-whisper，次之 asr_backends paraformer，最后 faster-whisper。"""
+    try:
+        from f5_tts.infer.asr_backends import transcribe
+
+        import torch
+
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        return transcribe(wav_path, lang="ja", device=device).strip()
+    except Exception as vnw_error:
+        # VNW 不可用时尝试 paraformer 直接走日文路径（远端已缓存，无需下载）
+        try:
+            from f5_tts.infer.asr_backends import get_paraformer_asr, clean_ja_text
+
+            import torch
+
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            asr = get_paraformer_asr(device=device)
+            results = asr.generate(input=wav_path, generate_kwargs={"language": "japanese", "task": "transcribe"})
+            raw = "".join(r.get("text", "") for r in results) if isinstance(results, list) else str(results)
+            return clean_ja_text(raw).strip()
+        except Exception as paraformer_error:
+            try:
+                segments, _ = asr_model().transcribe(
+                    wav_path,
+                    language="ja",
+                    beam_size=5,
+                    best_of=5,
+                    temperature=0.0,
+                    condition_on_previous_text=False,
+                    vad_filter=False,
+                )
+                return "".join(segment.text for segment in segments).strip()
+            except Exception as fallback_error:
+                raise RuntimeError(
+                    f"日文 ASR 均不可用：Visual-novel-whisper={vnw_error}; "
+                    f"paraformer={paraformer_error}; faster-whisper={fallback_error}"
+                ) from fallback_error
 
 
-def normalize_kana(text: str) -> str:
-    """转写归一化：汉字混排 → 片假名，去标点空白，供 CER 对齐。"""
-    from f5_tts.infer.ja_frontend import ja_to_kana
+def audio_diagnostics(wav_path: str, *, silence_db: float = -50.0) -> dict[str, float | int | bool]:
+    """Return dependency-light WAV integrity metrics used by matrix hard gates."""
+    import numpy as np
+    import soundfile as sf
 
-    kana = ja_to_kana(text)
+    audio, sample_rate = sf.read(wav_path, always_2d=True, dtype="float32")
+    finite = bool(np.isfinite(audio).all())
+    safe = np.nan_to_num(audio, nan=0.0, posinf=1.0, neginf=-1.0)
+    peak = float(np.max(np.abs(safe))) if safe.size else 0.0
+    threshold = 10.0 ** (silence_db / 20.0)
+    return {
+        "sample_rate": int(sample_rate),
+        "channels": int(audio.shape[1]),
+        "frames": int(audio.shape[0]),
+        "duration_seconds": float(audio.shape[0] / sample_rate) if sample_rate else 0.0,
+        "peak": peak,
+        "clipping_fraction": float(np.mean(np.abs(safe) >= 0.999)) if safe.size else 0.0,
+        "silence_fraction": float(np.mean(np.max(np.abs(safe), axis=1) < threshold)) if safe.size else 1.0,
+        "has_nan_inf": not finite,
+    }
+
+
+def score_audio(
+    wav_path: str,
+    *,
+    reference_kana: str | None = None,
+    speaker_reference: str | None = None,
+    emotion_reference: str | None = None,
+    metrics: tuple[str, ...] = ("cer", "speaker_sim", "emotion_sim"),
+) -> dict[str, object]:
+    """Score one clip, loading optional ASR/embedding models only when requested."""
+    row: dict[str, object] = audio_diagnostics(wav_path)
+    # 先算不依赖 ASR 的 embedding 指标。这样即使本机没装 faster-whisper，
+    # speaker/emotion 评分仍能落盘，CER 可以随后补跑而不是整行丢失。
+    if "speaker_sim" in metrics and speaker_reference:
+        row["speaker_sim"] = cosine(speaker_embedding(wav_path), speaker_embedding(speaker_reference))
+    if "emotion_sim" in metrics and emotion_reference:
+        row["emotion_sim"] = cosine(emotion_embedding(wav_path), emotion_embedding(emotion_reference))
+    if "cer" in metrics and reference_kana is not None:
+        hypothesis = transcribe_ja(wav_path)
+        row["asr_text"] = hypothesis
+        row["cer"] = cer(normalize_kana(hypothesis), normalize_kana(reference_kana, convert=False))
+    return row
+
+
+def normalize_kana(text: str, *, convert: bool = True) -> str:
+    """转写归一化：汉字混排 → 片假名，去标点空白，供 CER 对齐。
+
+    Prepared matrix manifests already contain kana; ``convert=False`` lets remote
+    scoring consume it without importing pyopenjtalk.
+    """
+    if convert:
+        from f5_tts.infer.ja_frontend import ja_to_kana
+
+        text = ja_to_kana(text)
     puncts = set("、。！？!?，,．.…「」『』（）()　 ・ー")
     # 长音符对 CER 噪声大（ASR 与 g2p 的长音表示常不一致），一并去掉
-    return "".join(c for c in kana if c not in puncts)
+    return "".join(c for c in text if c not in puncts)
 
 
 def cer(hyp: str, ref: str) -> float:
@@ -134,28 +236,37 @@ def cer(hyp: str, ref: str) -> float:
 
 
 def run(manifest_path: str, out_path: str):
-    manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+    manifest_file = Path(manifest_path).resolve()
+    manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+    base_dir = manifest_file.parent
     gen_text = manifest["gen_text"]
     ref_kana = normalize_kana(gen_text)
 
     results = []
     for case in manifest["cases"]:
-        wav = case["wav"]
-        if not Path(wav).exists():
+        wav = Path(case["wav"])
+        wav = wav if wav.is_absolute() else (base_dir / wav).resolve()
+        if not wav.exists():
             print(f"[skip] {case['id']}: {wav} 不存在")
             continue
 
         row = {"id": case["id"], "alpha": case.get("alpha")}
 
         emo_ref = case.get("ref_emotion_wav")
-        if emo_ref and Path(emo_ref).exists():
-            row["emotion_sim"] = round(cosine(emotion_embedding(wav), emotion_embedding(emo_ref)), 4)
+        if emo_ref:
+            emo_ref = Path(emo_ref)
+            emo_ref = emo_ref if emo_ref.is_absolute() else (base_dir / emo_ref).resolve()
+        if emo_ref and emo_ref.exists():
+            row["emotion_sim"] = round(cosine(emotion_embedding(str(wav)), emotion_embedding(str(emo_ref))), 4)
 
         spk_ref = case.get("ref_speaker_wav")
-        if spk_ref and Path(spk_ref).exists():
-            row["speaker_sim"] = round(cosine(speaker_embedding(wav), speaker_embedding(spk_ref)), 4)
+        if spk_ref:
+            spk_ref = Path(spk_ref)
+            spk_ref = spk_ref if spk_ref.is_absolute() else (base_dir / spk_ref).resolve()
+        if spk_ref and spk_ref.exists():
+            row["speaker_sim"] = round(cosine(speaker_embedding(str(wav)), speaker_embedding(str(spk_ref))), 4)
 
-        hyp = transcribe_ja(wav)
+        hyp = transcribe_ja(str(wav))
         row["asr_text"] = hyp
         row["cer"] = round(cer(normalize_kana(hyp), ref_kana), 4)
 
