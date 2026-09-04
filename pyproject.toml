@@ -29,6 +29,7 @@ dependencies = [
     "pydantic<=2.10.6",
     "pydub",
     "pypinyin",
+    "py7zr>=1.1.3",
     "rjieba",
     "safetensors",
     "soundfile",

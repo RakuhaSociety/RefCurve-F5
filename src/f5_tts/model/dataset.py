@@ -1,5 +1,6 @@
 import json
 from importlib.resources import files
+from pathlib import Path
 
 import torch
 import torch.nn.functional as F
@@ -11,6 +12,7 @@ from torch.utils.data import Dataset, Sampler
 from tqdm import tqdm
 
 from f5_tts.model.modules import MelSpec
+from f5_tts.model.sharded_dataset import ShardedArrowDataset, load_manifest, open_frame_index
 from f5_tts.model.utils import default
 
 
@@ -166,6 +168,18 @@ class CustomDataset(Dataset):
         }
 
 
+class ShardedCustomDataset(CustomDataset):
+    """CustomDataset adapter backed by a validated sharded frame index."""
+
+    def __init__(self, custom_dataset: Dataset, frame_lengths, **kwargs):
+        super().__init__(custom_dataset, durations=None, **kwargs)
+        self.frame_lengths = frame_lengths
+        self.dataset_identity = getattr(custom_dataset, "dataset_identity", None)
+
+    def get_frame_len(self, index):
+        return int(self.frame_lengths[index])
+
+
 # Dynamic Batch Sampler
 class DynamicBatchSampler(Sampler[list[int]]):
     """Extension of Sampler that will do the following:
@@ -250,27 +264,28 @@ def load_dataset(
     dataset_type: str = "CustomDataset",
     audio_type: str = "raw",
     mel_spec_module: nn.Module | None = None,
-    mel_spec_kwargs: dict = dict(),
-) -> CustomDataset | HFDataset:
+    mel_spec_kwargs: dict | None = None,
+    audio_roots: dict[str, str | Path] | None = None,
+) -> CustomDataset | ShardedCustomDataset | HFDataset:
     """
     dataset_type    - "CustomDataset" if you want to use tokenizer name and default data path to load for train_dataset
                     - "CustomDatasetPath" if you just want to pass the full path to a preprocessed dataset without relying on tokenizer
+                    - "ShardedArrowDataset" for a manifest.json or its containing directory
     """
 
     print("Loading dataset ...")
+    mel_spec_kwargs = {} if mel_spec_kwargs is None else mel_spec_kwargs
 
     if dataset_type == "CustomDataset":
-        rel_data_path = str(files("f5_tts").joinpath(f"../../data/{dataset_name}_{tokenizer}"))
+        rel_data_path = Path(files("f5_tts").joinpath(f"../../data/{dataset_name}_{tokenizer}"))
         if audio_type == "raw":
-            try:
-                train_dataset = load_from_disk(f"{rel_data_path}/raw")
-            except:  # noqa: E722
-                train_dataset = Dataset_.from_file(f"{rel_data_path}/raw.arrow")
+            raw_dir = rel_data_path / "raw"
+            train_dataset = load_from_disk(str(raw_dir)) if raw_dir.is_dir() else Dataset_.from_file(str(rel_data_path / "raw.arrow"))
             preprocessed_mel = False
         elif audio_type == "mel":
-            train_dataset = Dataset_.from_file(f"{rel_data_path}/mel.arrow")
+            train_dataset = Dataset_.from_file(str(rel_data_path / "mel.arrow"))
             preprocessed_mel = True
-        with open(f"{rel_data_path}/duration.json", "r", encoding="utf-8") as f:
+        with (rel_data_path / "duration.json").open("r", encoding="utf-8") as f:
             data_dict = json.load(f)
         durations = data_dict["duration"]
         train_dataset = CustomDataset(
@@ -282,16 +297,50 @@ def load_dataset(
         )
 
     elif dataset_type == "CustomDatasetPath":
-        try:
-            train_dataset = load_from_disk(f"{dataset_name}/raw")
-        except:  # noqa: E722
-            train_dataset = Dataset_.from_file(f"{dataset_name}/raw.arrow")
+        rel_data_path = Path(dataset_name).expanduser()
+        if audio_type == "raw":
+            raw_dir = rel_data_path / "raw"
+            train_dataset = load_from_disk(str(raw_dir)) if raw_dir.is_dir() else Dataset_.from_file(str(rel_data_path / "raw.arrow"))
+            preprocessed_mel = False
+        elif audio_type == "mel":
+            train_dataset = Dataset_.from_file(str(rel_data_path / "mel.arrow"))
+            preprocessed_mel = True
+        else:
+            raise ValueError(f"audio_type must be either 'raw' or 'mel', but received {audio_type}")
 
-        with open(f"{dataset_name}/duration.json", "r", encoding="utf-8") as f:
+        with (rel_data_path / "duration.json").open("r", encoding="utf-8") as f:
             data_dict = json.load(f)
         durations = data_dict["duration"]
         train_dataset = CustomDataset(
-            train_dataset, durations=durations, preprocessed_mel=preprocessed_mel, **mel_spec_kwargs
+            train_dataset,
+            durations=durations,
+            preprocessed_mel=preprocessed_mel,
+            mel_spec_module=mel_spec_module,
+            **mel_spec_kwargs,
+        )
+
+    elif dataset_type == "ShardedArrowDataset":
+        if audio_type != "raw":
+            raise ValueError("ShardedArrowDataset currently supports only audio_type='raw'")
+        manifest_path = Path(dataset_name).expanduser()
+        if manifest_path.is_dir():
+            manifest_path = manifest_path / "manifest.json"
+        manifest = load_manifest(manifest_path)
+        requested_sample_rate = int(mel_spec_kwargs.get("target_sample_rate", manifest.sample_rate))
+        requested_hop_length = int(mel_spec_kwargs.get("hop_length", manifest.hop_length))
+        if (requested_sample_rate, requested_hop_length) != (manifest.sample_rate, manifest.hop_length):
+            raise ValueError(
+                "sharded frame-index audio settings do not match mel settings: "
+                f"manifest=({manifest.sample_rate}, {manifest.hop_length}), "
+                f"requested=({requested_sample_rate}, {requested_hop_length})"
+            )
+        sharded_data = ShardedArrowDataset(manifest, audio_roots=audio_roots)
+        train_dataset = ShardedCustomDataset(
+            sharded_data,
+            frame_lengths=open_frame_index(manifest),
+            preprocessed_mel=False,
+            mel_spec_module=mel_spec_module,
+            **mel_spec_kwargs,
         )
 
     elif dataset_type == "HFDataset":
@@ -302,6 +351,12 @@ def load_dataset(
         pre, post = dataset_name.split("_")
         train_dataset = HFDataset(
             load_dataset(f"{pre}/{pre}", split=f"train.{post}", cache_dir=str(files("f5_tts").joinpath("../../data"))),
+        )
+
+    else:
+        raise ValueError(
+            "dataset_type must be one of 'CustomDataset', 'CustomDatasetPath', "
+            f"'ShardedArrowDataset', or 'HFDataset', but received {dataset_type!r}"
         )
 
     return train_dataset
