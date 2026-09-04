@@ -1,0 +1,337 @@
+{
+  "schema_version": "jmica-checkpoint-eval-v1",
+  "description": "Yanase_Natumi_akk Phase-1 微调评估：7 系统 × 16 文本 = 112 WAV。目标文本全部新写，对 6019 条训练文本做原文/假名双重泄漏检查。",
+  "created_at": "2026-08-25",
+  "status": "draft",
+  "notes": "文本/参考的假名、hash 在 prepare 阶段由 eval_jmica_matrix.py 填充。",
+
+  "inference": {
+    "nfe_step": 32,
+    "cfg_strength": 2.0,
+    "sway_sampling_coef": -1.0,
+    "speed": 1.0,
+    "ode_method": "euler",
+    "cross_fade_duration": 0.15,
+    "mel_spec_type": "vocos",
+    "vocoder_path": "ckpts/vocos-mel-24khz",
+    "vocab_path": "ckpts/F5TTS_JA_Jmica/vocab_japanese.txt"
+  },
+
+  "generation": {
+    "primary_seed": 777,
+    "device": "auto"
+  },
+
+  "systems": [
+    {
+      "id": "baseline_ema",
+      "checkpoint": "ckpts/F5TTS_JA_Jmica/model_21999120.pt",
+      "checkpoint_step": 21999120,
+      "weight_source": "ema",
+      "baseline": true,
+      "checkpoint_sha256": null
+    },
+    {
+      "id": "step4500_online",
+      "checkpoint": "ckpts/F5TTS_Jmica_JA_Yanase_Natumi_akk/model_4500.pt",
+      "checkpoint_step": 4500,
+      "weight_source": "online",
+      "baseline": false,
+      "checkpoint_sha256": null
+    },
+    {
+      "id": "step4500_ema",
+      "checkpoint": "ckpts/F5TTS_Jmica_JA_Yanase_Natumi_akk/model_4500.pt",
+      "checkpoint_step": 4500,
+      "weight_source": "ema",
+      "baseline": false,
+      "checkpoint_sha256": null
+    },
+    {
+      "id": "step5500_online",
+      "checkpoint": "ckpts/F5TTS_Jmica_JA_Yanase_Natumi_akk/model_5500.pt",
+      "checkpoint_step": 5500,
+      "weight_source": "online",
+      "baseline": false,
+      "checkpoint_sha256": null
+    },
+    {
+      "id": "step5500_ema",
+      "checkpoint": "ckpts/F5TTS_Jmica_JA_Yanase_Natumi_akk/model_5500.pt",
+      "checkpoint_step": 5500,
+      "weight_source": "ema",
+      "baseline": false,
+      "checkpoint_sha256": null
+    },
+    {
+      "id": "step6500_online",
+      "checkpoint": "ckpts/F5TTS_Jmica_JA_Yanase_Natumi_akk/model_6500.pt",
+      "checkpoint_step": 6500,
+      "weight_source": "online",
+      "baseline": false,
+      "checkpoint_sha256": null
+    },
+    {
+      "id": "step6500_ema",
+      "checkpoint": "ckpts/F5TTS_Jmica_JA_Yanase_Natumi_akk/model_6500.pt",
+      "checkpoint_step": 6500,
+      "weight_source": "ema",
+      "baseline": false,
+      "checkpoint_sha256": null
+    }
+  ],
+
+  "references": [
+    {
+      "id": "ref_neutral",
+      "audio": null,
+      "audio_sha256": null,
+      "text_original": null,
+      "text_kana": null,
+      "emotion_label": "neutral",
+      "data_relation": null,
+      "notes": "prepare フェーズで手動確認後に埋める。OOV除外または訓練済み録音から選択。"
+    },
+    {
+      "id": "ref_expressive",
+      "audio": null,
+      "audio_sha256": null,
+      "text_original": null,
+      "text_kana": null,
+      "emotion_label": "expressive",
+      "data_relation": null,
+      "notes": "感情テキスト用。強い表現か活発な台詞。"
+    },
+    {
+      "id": "ref_soft",
+      "audio": null,
+      "audio_sha256": null,
+      "text_original": null,
+      "text_kana": null,
+      "emotion_label": "soft",
+      "data_relation": null,
+      "notes": "柔らかい/ネガティブな感情テキスト用。"
+    }
+  ],
+
+  "texts": [
+    {
+      "id": "core_narr_01",
+      "split": "core",
+      "category": "narration",
+      "text_original": "今日は空がとても澄み渡っていて、遠くの山並みまではっきりと見えた。",
+      "text_kana": null,
+      "text_kana_sha256": null,
+      "reference_id": "ref_neutral",
+      "human_listening": true,
+      "leakage_status": null,
+      "notes": "普通叙述 1"
+    },
+    {
+      "id": "core_narr_02",
+      "split": "core",
+      "category": "narration",
+      "text_original": "彼女は静かに本を閉じて、窓の外に広がる夜景をしばらく眺めていた。",
+      "text_kana": null,
+      "text_kana_sha256": null,
+      "reference_id": "ref_neutral",
+      "human_listening": true,
+      "leakage_status": null,
+      "notes": "普通叙述 2"
+    },
+    {
+      "id": "core_conv_01",
+      "split": "core",
+      "category": "conversational",
+      "text_original": "えっと、それって本当に大丈夫なの？もう少し教えてもらえる？",
+      "text_kana": null,
+      "text_kana_sha256": null,
+      "reference_id": "ref_neutral",
+      "human_listening": true,
+      "leakage_status": null,
+      "notes": "自然な疑問表現 1"
+    },
+    {
+      "id": "core_conv_02",
+      "split": "core",
+      "category": "conversational",
+      "text_original": "ねえ、聞いてた？さっきの話、ちゃんと伝わったかな。",
+      "text_kana": null,
+      "text_kana_sha256": null,
+      "reference_id": "ref_neutral",
+      "human_listening": true,
+      "leakage_status": null,
+      "notes": "短い対話的発言 2"
+    },
+    {
+      "id": "core_emo_hi_01",
+      "split": "core",
+      "category": "emotion_high",
+      "text_original": "やっぱりそうか！ずっと待ってたんだよ、こういう日を！本当によかった！",
+      "text_kana": null,
+      "text_kana_sha256": null,
+      "reference_id": "ref_expressive",
+      "human_listening": true,
+      "leakage_status": null,
+      "notes": "高アローザル 喜び・興奮"
+    },
+    {
+      "id": "core_emo_lo_01",
+      "split": "core",
+      "category": "emotion_low",
+      "text_original": "……もう、どうしたらいいんだろ。これ以上続けるのが怖くて。",
+      "text_kana": null,
+      "text_kana_sha256": null,
+      "reference_id": "ref_soft",
+      "human_listening": true,
+      "leakage_status": null,
+      "notes": "低アローザル 不安・弱音"
+    },
+    {
+      "id": "core_num_01",
+      "split": "core",
+      "category": "numbers",
+      "text_original": "先月の売り上げは二百三十七万円で、前月比で約十二パーセント増加しました。",
+      "text_kana": null,
+      "text_kana_sha256": null,
+      "reference_id": "ref_neutral",
+      "human_listening": true,
+      "leakage_status": null,
+      "notes": "数字・金額・割合"
+    },
+    {
+      "id": "core_num_02",
+      "split": "core",
+      "category": "numbers",
+      "text_original": "待ち合わせは十二月二十五日の午後三時半、渋谷の改札口で。",
+      "text_kana": null,
+      "text_kana_sha256": null,
+      "reference_id": "ref_neutral",
+      "human_listening": true,
+      "leakage_status": null,
+      "notes": "日付・時刻"
+    },
+    {
+      "id": "core_loan_01",
+      "split": "core",
+      "category": "loanwords",
+      "text_original": "ノートパソコンのバッテリーがフル充電になるまで、だいたい一時間半かかる。",
+      "text_kana": null,
+      "text_kana_sha256": null,
+      "reference_id": "ref_neutral",
+      "human_listening": true,
+      "leakage_status": null,
+      "notes": "外来語・長音"
+    },
+    {
+      "id": "core_loan_02",
+      "split": "core",
+      "category": "loanwords",
+      "text_original": "ミルクティーとショートケーキのセットで、合計千百二十円になります。",
+      "text_kana": null,
+      "text_kana_sha256": null,
+      "reference_id": "ref_neutral",
+      "human_listening": true,
+      "leakage_status": null,
+      "notes": "外来語 + 数字 + 助数詞"
+    },
+    {
+      "id": "robust_long_01",
+      "split": "robustness",
+      "category": "long",
+      "text_original": "彼女が廊下の端に立っているのを見つけたとき、私はすぐに何か変だと感じたのだが、その直感を確かめる勇気がなかなか出なかった。",
+      "text_kana": null,
+      "text_kana_sha256": null,
+      "reference_id": "ref_neutral",
+      "human_listening": false,
+      "leakage_status": null,
+      "notes": "長文 複数節"
+    },
+    {
+      "id": "robust_punct_01",
+      "split": "robustness",
+      "category": "punctuation",
+      "text_original": "「え……本当に？」と彼女は呟いて、「それって、つまり……そういうことなの？」と続けた。",
+      "text_kana": null,
+      "text_kana_sha256": null,
+      "reference_id": "ref_neutral",
+      "human_listening": false,
+      "leakage_status": null,
+      "notes": "会話記号・三点リーダー・疑問符混在"
+    },
+    {
+      "id": "robust_num_dense_01",
+      "split": "robustness",
+      "category": "number_dense",
+      "text_original": "第三章の第七節、百八十二ページから百九十五ページの内容を三十分以内にまとめること。",
+      "text_kana": null,
+      "text_kana_sha256": null,
+      "reference_id": "ref_neutral",
+      "human_listening": false,
+      "leakage_status": null,
+      "notes": "数字密集 連続する数字読み"
+    },
+    {
+      "id": "robust_kata_dense_01",
+      "split": "robustness",
+      "category": "katakana_dense",
+      "text_original": "コンシューマーゲームのローンチタイトルとして、オープンワールドRPGがリリースされる予定だ。",
+      "text_kana": null,
+      "text_kana_sha256": null,
+      "reference_id": "ref_neutral",
+      "human_listening": false,
+      "leakage_status": null,
+      "notes": "片仮名密集"
+    },
+    {
+      "id": "robust_geminate_01",
+      "split": "robustness",
+      "category": "geminate_long_vowel",
+      "text_original": "コップについた水滴がテーブルに落ちた瞬間、彼女はハッとして思わず立ち止まった。",
+      "text_kana": null,
+      "text_kana_sha256": null,
+      "reference_id": "ref_neutral",
+      "human_listening": false,
+      "leakage_status": null,
+      "notes": "促音・長音・混在"
+    },
+    {
+      "id": "robust_emo_question_01",
+      "split": "robustness",
+      "category": "emotion_question",
+      "text_original": "なんでそんなひどいことが言えるの？私がどれだけ傷ついたか、わかってる？",
+      "text_kana": null,
+      "text_kana_sha256": null,
+      "reference_id": "ref_expressive",
+      "human_listening": false,
+      "leakage_status": null,
+      "notes": "感情的疑問 非難 複雑プロソディ"
+    }
+  ],
+
+  "gates": {
+    "hard": {
+      "total_clips_required": 112,
+      "format": {"sample_rate": 24000, "channels": 1},
+      "max_clipping_fraction": 0.001,
+      "min_duration_seconds": 0.5,
+      "max_duration_seconds": 20.0,
+      "allow_nan_inf": false,
+      "max_silence_fraction": 0.6
+    },
+    "objective": {
+      "max_core_median_cer_delta_vs_baseline": 0.03,
+      "max_core_p90_cer_delta_vs_baseline": 0.08,
+      "max_catastrophic_cer_per_text": 0.5,
+      "min_speaker_similarity_delta_vs_baseline_median": -0.03,
+      "min_speaker_similarity_delta_vs_baseline_p10": -0.05,
+      "max_utmos_delta_vs_baseline_mean": -0.15
+    }
+  },
+
+  "leakage_check": {
+    "training_metadata_path": "data_staging/Yanase_Natumi_akk/metadata_clean.csv",
+    "max_kana_ngram_jaccard_flag": 0.6,
+    "min_ngram_n": 3
+  }
+}
