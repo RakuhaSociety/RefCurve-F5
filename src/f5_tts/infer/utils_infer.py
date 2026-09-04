@@ -1342,6 +1342,101 @@ def remove_silence_for_generated_wav(filename):
     aseg.export(filename, format="wav")
 
 
+# ✅ 生成音频的静音整理（首尾裁剪 / 内部空白压缩）
+
+
+def trim_generated_silence(
+    wave,
+    sr,
+    trim_edges=True,
+    edge_pad_s=0.05,
+    max_internal_silence_s=None,
+    threshold_rel_db=40.0,
+    hop=256,
+):
+    """裁掉生成音频的首尾静音，并可选把过长的内部空白压到上限。返回 (wave, info)。
+
+    空白的来源是架构性的：生成帧数在推理前就按「参考帧数 / 参考文本量 × 目标
+    文本量 / speed」算定（见 infer_batch_process 里的 duration 估算），模型拿到的是
+    一块定长画布、必须填满，没有「说完就停」这个选项。而实测同 mora 数的台词真实
+    时长能差 4-6 倍（表演性停顿、拖腔不在文本里），任何纯文本估计都留不准，所以
+    [utils_infer.py 的 duration 注释] 选择宁可多给画布——事后清理才是配套的那一半。
+
+    为什么不直接用上面的 remove_silence_for_generated_wav()：它的默认参数
+    (min_silence_len=1000ms, keep_silence=500ms) 只认 >=1s 的静音、每段两侧又各留
+    500ms。实测生成音频的首尾空白多在 0.5-0.9s，正好落在盲区——4.70s 的样本处理
+    后首部 0.86s 一动不动。且 silence_thresh=-50 是绝对 dBFS，整体偏轻的音频有被
+    全判静音、输出为空的风险。
+
+    这里改用相对阈值（峰值 - threshold_rel_db，与诊断脚本同一口径），并把两件事
+    分开，因为它们的副作用完全不同：
+
+      trim_edges              首尾裁剪。几乎无副作用，可默认开。
+      max_internal_silence_s  内部空白压到该上限（秒）；None 表示不动。
+
+    内部空白刻意压到上限而非清零：句读处的停顿（逗号、问号）是正常语调，清零会
+    让语速发急；要压的是吞字留下的 1.5s+ 空位。压缩取两端对称保留，保住前一句的
+    尾音衰减与后一句的起音。
+    """
+    wave = np.asarray(wave)
+    if wave.ndim > 1:  # [C, T] 或 [T, C] 都折成单声道用于检测，但不改变输出通道
+        raise ValueError(f"trim_generated_silence expects 1-D audio, got shape {wave.shape}")
+    # NaN 的比较恒为 False，会一路穿过 min/max 夹取，直到 int(round(...)) 才炸；
+    # 调用方那边此时推理已经跑完，所以在入口就挡掉并说清原因。
+    if max_internal_silence_s is not None and not np.isfinite(max_internal_silence_s):
+        raise ValueError(f"max_internal_silence_s must be finite, got {max_internal_silence_s!r}")
+
+    info = {"orig_s": len(wave) / sr, "lead_cut_s": 0.0, "trail_cut_s": 0.0, "internal_cut_s": 0.0}
+    n_frames = len(wave) // hop
+    if n_frames < 4:
+        info["final_s"] = len(wave) / sr
+        return wave, info
+
+    frames = wave[: n_frames * hop].reshape(n_frames, hop)
+    db = 20.0 * np.log10(np.sqrt(np.mean(frames.astype(np.float64) ** 2, axis=1)) + 1e-10)
+    voiced = np.flatnonzero(db > db.max() - threshold_rel_db)
+    if len(voiced) == 0:  # 全静音：原样返回，绝不返回空数组
+        info["final_s"] = len(wave) / sr
+        return wave, info
+
+    first, last = int(voiced[0]), int(voiced[-1])
+    pad = max(0, int(round(edge_pad_s * sr / hop)))
+
+    # 先定首尾边界（帧域），再在其内部找需要压缩的空白段
+    lo = max(0, first - pad) if trim_edges else 0
+    hi = min(n_frames, last + 1 + pad) if trim_edges else n_frames
+
+    keep = []  # 帧域 [start, end) 区间列表
+    if max_internal_silence_s is not None:
+        cap = max(1, int(round(max_internal_silence_s * sr / hop)))
+        cursor = lo
+        prev = voiced[0]
+        for cur in voiced[1:]:
+            gap = int(cur - prev) - 1
+            if gap > cap:
+                # 对称保留：前 cap/2 帧（尾音衰减）+ 后 cap-cap/2 帧（起音铺垫）
+                head = cap // 2
+                keep.append((cursor, int(prev) + 1 + head))
+                cursor = int(cur) - (cap - head)
+                info["internal_cut_s"] += (gap - cap) * hop / sr
+            prev = cur
+        keep.append((cursor, hi))
+    else:
+        keep.append((lo, hi))
+
+    def _sample_end(frame_end):
+        # len(wave) 未必是 hop 整数倍，n_frames 向下取整会漏掉末尾最多 hop-1 个样本
+        # （24kHz / hop=256 下约 8ms）。按 e*hop 切会把这段静默丢掉，而尾部恰好是
+        # 语音时丢的就是收尾——与"宁可留静音也不截内容"的取舍相反。
+        return len(wave) if frame_end >= n_frames else frame_end * hop
+
+    out = np.concatenate([wave[s * hop : _sample_end(e)] for s, e in keep]) if keep else wave
+    info["lead_cut_s"] = lo * hop / sr
+    info["trail_cut_s"] = (n_frames - hi) * hop / sr
+    info["final_s"] = len(out) / sr
+    return out, info
+
+
 # save spectrogram
 
 

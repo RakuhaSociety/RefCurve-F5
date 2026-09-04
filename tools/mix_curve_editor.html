@@ -60,9 +60,10 @@
     <div class="toolbar">
       <label>Server URL: <input id="serverUrl" type="text" value="http://localhost:8002/infer" style="width:260px;" /></label>
       <label>mix_on:
-        <select id="mixOn">
+        <select id="mixOn" title="two_stage: 两条参考长度差得多时用它（先各自单独合成再混合），推理三次约 3 倍耗时。注意 2d_grid 的横轴覆盖 prompt+生成段，可听部分从 50% 起（cond/pred 约 35% 起，随参考长度变）。">
           <option value="cond">cond</option>
           <option value="pred">pred</option>
+          <option value="two_stage">two_stage</option>
           <option value="output">output</option>
         </select>
       </label>
@@ -103,6 +104,8 @@
       <label>sway: <input id="sway" type="number" step="0.1" value="-1.0" style="width:80px;" /></label>
       <label>speed: <input id="speed" type="number" step="0.05" value="1.0" style="width:80px;" /></label>
       <label>seed: <input id="seed" type="number" step="1" value="" style="width:80px;" placeholder="可空" /></label>
+      <label title="生成长度在推理前按字节比例算定，模型拿到定长画布必须填满，估不准的余量成为静音。此项裁掉首尾，各留 50ms。"><input id="trimEdges" type="checkbox" checked /> 裁首尾静音</label>
+      <label title="把句中过长空白压到该上限（秒），0 表示不处理。句读停顿是正常语调，压太狠会让语速发急。">内部空白上限: <input id="maxInternalSilence" type="number" step="0.05" min="0" max="2" value="0" style="width:80px;" /></label>
     </div>
     <div class="toolbar">
       <button id="runBtn">Run Inference</button>
@@ -139,6 +142,8 @@
     const mixSchedule = document.getElementById('mixSchedule');
     const mix2dMode = document.getElementById('mix2dMode');
     const allowExtrapolation = document.getElementById('allowExtrapolation');
+    const trimEdges = document.getElementById('trimEdges');
+    const maxInternalSilence = document.getElementById('maxInternalSilence');
     const runBtn = document.getElementById('runBtn');
     const statusSpan = document.getElementById('status');
     const player = document.getElementById('player');
@@ -451,6 +456,8 @@
       fd.append('mix_a_end', mixEnd.toString());
       fd.append('mix_2d_mode', mix2dMode.value);
       fd.append('allow_extrapolation', allowExtrapolation.checked ? 'true' : 'false');
+      fd.append('trim_edges', trimEdges.checked ? 'true' : 'false');
+      fd.append('max_internal_silence', maxInternalSilence.value || '0');
       fd.append('mix_2d_weights', JSON.stringify(grid));
       fd.append('use_asr', 'true');
 

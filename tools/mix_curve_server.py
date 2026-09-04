@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import sys
 import tempfile
@@ -16,8 +17,15 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from f5_tts.infer.gradio_mix_demo import _load_default_model, _get_paraformer_asr, _clean_cn_text
-from f5_tts.infer.utils_infer import infer_process, target_rms, cross_fade_duration, fix_duration
+from f5_tts.infer.asr_backends import AsrUnavailable, transcribe
+from f5_tts.infer.gradio_mix_demo import _load_default_model
+from f5_tts.infer.utils_infer import (
+    infer_process,
+    target_rms,
+    cross_fade_duration,
+    fix_duration,
+    trim_generated_silence,
+)
 
 app = FastAPI()
 # 仅供本机使用：默认绑定 127.0.0.1（见文件末尾），CORS 也只放行本地来源。
@@ -116,6 +124,9 @@ async def infer_endpoint(
     n_a_end: Optional[float] = Form(None),
     seed: Optional[int] = Form(None),
     use_asr: bool = Form(False),
+    asr_lang: str = Form("zh"),
+    trim_edges: bool = Form(True),
+    max_internal_silence: float = Form(0.0),
 ):
     if len(gen_text) > MAX_GEN_CHARS:
         raise HTTPException(status_code=400, detail=f"gen_text exceeds {MAX_GEN_CHARS} chars")
@@ -126,9 +137,20 @@ async def infer_endpoint(
     cfg = max(0.0, min(float(cfg), 10.0))
     sway_coef = max(-10.0, min(float(sway_coef), 10.0))
 
-    # 白名单 mix_on，默认 cond
-    if mix_on not in ("cond", "pred", "output"):
-        mix_on = "cond"
+    # ✅ 白名单 mix_on。不再静默降级成 cond——用户选了 two_stage 却拿到 cond 的结果，
+    # 听感差异被归因到曲线参数上，比直接报错更难排查。
+    if mix_on not in ("cond", "pred", "two_stage", "output"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown mix_on: {mix_on!r}, expected one of cond / pred / two_stage / output",
+        )
+
+    # ✅ NaN/Inf 必须在推理之前挡掉。NaN 的比较恒为 False，min(max(nan,0),2) 会原样
+    # 返回 nan，一路到 trim 里的 int(round(nan*sr/hop)) 才抛异常——那时完整推理已经
+    # 白跑一遍。float("nan"/"inf") 能合法解析成 float，所以 FastAPI 的类型校验拦不住，
+    # 必须在这里显式判。
+    if not math.isfinite(float(max_internal_silence)):
+        raise HTTPException(status_code=400, detail="max_internal_silence must be finite")
 
     ref_a_path = save_upload_tmp(ref_a)
     tmp_wav = None
@@ -143,17 +165,15 @@ async def infer_endpoint(
 
         model, vocoder, device = get_model()
 
-        # Optional ASR when text is empty
+        # Optional ASR when text is empty（asr_lang="zh" 走 FunASR，"ja" 走 Visual-novel-whisper）
         if use_asr and (not ref_text_a.strip() or not ref_text_b.strip()):
-            asr = _get_paraformer_asr(device=device)
-            if not ref_text_a.strip():
-                res = asr.generate(input=str(ref_a_path), batch_size=1)
-                ref_text_a = res[0].get("text", "") if isinstance(res, list) else res.get("text", "")
-                ref_text_a = _clean_cn_text(ref_text_a)
-            if not ref_text_b.strip():
-                res = asr.generate(input=str(ref_b_path), batch_size=1)
-                ref_text_b = res[0].get("text", "") if isinstance(res, list) else res.get("text", "")
-                ref_text_b = _clean_cn_text(ref_text_b)
+            try:
+                if not ref_text_a.strip():
+                    ref_text_a = transcribe(str(ref_a_path), lang=asr_lang, device=device)
+                if not ref_text_b.strip():
+                    ref_text_b = transcribe(str(ref_b_path), lang=asr_lang, device=device)
+            except (AsrUnavailable, ValueError) as e:
+                raise HTTPException(status_code=400, detail=str(e))
 
         # If still empty, give a dot to skip ASR
         if not ref_text_a.strip():
@@ -193,6 +213,19 @@ async def infer_endpoint(
             n_a_start=n_a_start,
             n_a_end=n_a_end,
         )
+
+        # ✅ 生成长度在推理前就按字节比例算定，模型拿到定长画布必须填满，估不准的
+        # 余量成为静音。这里做事后整理，与试验台同一套语义。
+        # 上限同样服务端夹一次：客户端表单不可信。
+        # 有限性已在推理前校验过（见上面的 math.isfinite），这里只夹取范围。
+        cap = min(max(float(max_internal_silence), 0.0), 2.0)
+        if trim_edges or cap > 0:
+            audio_np, _ = trim_generated_silence(
+                audio_np,
+                sr,
+                trim_edges=bool(trim_edges),
+                max_internal_silence_s=cap if cap > 0 else None,
+            )
 
         # save to wav in-memory
         tensor = torch.tensor(audio_np).unsqueeze(0)  # [1, T]
