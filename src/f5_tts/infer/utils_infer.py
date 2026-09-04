@@ -539,6 +539,7 @@ def infer_process(
     mix_a_end=0.9,
     mix_2d_mode="t_only",
     mix_2d_weights=None,
+    mix_2d_grid_domain="full",  # "full": 横轴映射 max_duration; "gen": 只映射生成段
     n_schedule=None,
     n_a_start=None,
     n_a_end=None,
@@ -623,6 +624,7 @@ def infer_process(
             mix_a_end=mix_a_end,
             mix_2d_mode=mix_2d_mode,
             mix_2d_weights=mix_2d_weights,
+            mix_2d_grid_domain="full",  # "full": 横轴映射 max_duration; "gen": 只映射生成段
             n_schedule=n_schedule,
             n_a_start=n_a_start,
             n_a_end=n_a_end,
@@ -668,6 +670,7 @@ def infer_batch_process(
     mix_a_end=0.9,
     mix_2d_mode="t_only",
     mix_2d_weights=None,
+    mix_2d_grid_domain="full",  # "full": 横轴映射 max_duration; "gen": 只映射生成段
     n_schedule=None,
     n_a_start=None,
     n_a_end=None,
@@ -975,6 +978,7 @@ def infer_batch_process(
                 mix_a_end=mix_a_end,
                 mix_2d_mode=mix_2d_mode,
                 mix_2d_weights=local_mix_2d,
+                mix_2d_grid_domain="full",  # "full": 横轴映射 max_duration; "gen": 只映射生成段
                 n_schedule=n_schedule,
                 n_a_start=n_a_start,
                 n_a_end=n_a_end,
@@ -1223,6 +1227,7 @@ def infer_batch_process(
                 mix_a_end=mix_a_end,
                 mix_2d_mode=mix_2d_mode,
                 mix_2d_weights=local_mix_2d,
+                mix_2d_grid_domain="full",  # "full": 横轴映射 max_duration; "gen": 只映射生成段
                 n_schedule=n_schedule,
                 n_a_start=n_a_start,
                 n_a_end=n_a_end,

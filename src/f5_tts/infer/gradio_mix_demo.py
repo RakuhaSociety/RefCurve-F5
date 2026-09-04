@@ -144,6 +144,7 @@ def run_inference(
     mix_a_start,
     mix_a_end,
     mix_2d_mode,
+    mix_2d_grid_domain,
     n_schedule,
     n_a_start,
     n_a_end,
@@ -251,6 +252,7 @@ def run_inference(
         mix_a_start=mix_a_start,
         mix_a_end=mix_a_end,
         mix_2d_mode=mix_2d_mode,
+        mix_2d_grid_domain=mix_2d_grid_domain,
         n_schedule=n_schedule,
         n_a_start=n_a_start,
         n_a_end=n_a_end,
@@ -396,6 +398,15 @@ def build_interface():
                             label="2D 组合模式（仅 cond / pred / two_stage）",
                             info="output 模式无 t / n 两维可组合，此项被忽略。",
                         )
+                        mix_2d_grid_domain = gr.Radio(
+                            ["full", "gen"],
+                            value="full",
+                            label="2D 网格横轴域",
+                            info=(
+                                "full：横轴映射 prompt+生成段（历史行为，左侧 35~50% 落在 prompt 区）；"
+                                "gen：横轴只映射生成段，prompt 区用首列权重填充。"
+                            ),
+                        )
                         n_schedule = gr.Radio(
                             ["none", "linear", "cosine", "sigmoid"],
                             value="linear",
@@ -431,6 +442,7 @@ def build_interface():
                         mix_a_start,
                         mix_a_end,
                         mix_2d_mode,
+                        mix_2d_grid_domain,
                         n_schedule,
                         n_a_start,
                         n_a_end,

@@ -81,6 +81,12 @@
           <option value="sigmoid">sigmoid</option>
         </select>
       </label>
+      <label>mix_2d_grid_domain:
+        <select id="gridDomain" title="full: 横轴映射 prompt+生成段（历史行为）; gen: 只映射生成段，prompt 区用首列权重填充">
+          <option value="full" selected>full（历史行为）</option>
+          <option value="gen">gen（生成段对齐）</option>
+        </select>
+      </label>
       <label>mix_2d_mode:
         <select id="mix2dMode">
           <option value="2d_grid">2d_grid</option>
@@ -141,6 +147,7 @@
     const mixMethod = document.getElementById('mixMethod');
     const mixSchedule = document.getElementById('mixSchedule');
     const mix2dMode = document.getElementById('mix2dMode');
+    const gridDomain = document.getElementById('gridDomain');
     const allowExtrapolation = document.getElementById('allowExtrapolation');
     const trimEdges = document.getElementById('trimEdges');
     const maxInternalSilence = document.getElementById('maxInternalSilence');
@@ -455,6 +462,7 @@
       fd.append('mix_a_start', mixStart.toString());
       fd.append('mix_a_end', mixEnd.toString());
       fd.append('mix_2d_mode', mix2dMode.value);
+      fd.append('mix_2d_grid_domain', gridDomain ? gridDomain.value : 'full');
       fd.append('allow_extrapolation', allowExtrapolation.checked ? 'true' : 'false');
       fd.append('trim_edges', trimEdges.checked ? 'true' : 'false');
       fd.append('max_internal_silence', maxInternalSilence.value || '0');

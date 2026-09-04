@@ -267,6 +267,8 @@ class CFM(nn.Module):
         # "2d_grid": 使用 2D 权重网格 [steps, n_frames]
         mix_2d_mode="t_only",
         mix_2d_weights=None,     # 可选: 直接传入 2D 权重矩阵 [steps, n_frames]
+        mix_2d_grid_domain="full",  # "full"：横轴映射 max_duration（历史行为）
+                                    # "gen" ：横轴只映射生成段，prompt 区用首列权重
 
     ):
         self.eval()
@@ -479,18 +481,35 @@ class CFM(nn.Module):
                 # 使用预定义的 2D 权重网格
                 if mix_2d_weights is None:
                     raise ValueError("mix_2d_mode='2d_grid' requires mix_2d_weights")
-                # mix_2d_weights: [steps, n_frames]
-                # 需要根据当前 t 找到对应的行
-                # t 在 [0, 1]，steps 行
                 weights = mix_2d_weights.to(device=device, dtype=cond_a.dtype)
                 n_steps = weights.shape[0]
                 step_idx = (t * (n_steps - 1)).long().clamp(0, n_steps - 1)
-                row = weights[step_idx]  # [n_frames]
-                # 如果帧数不匹配，插值
-                if row.shape[0] != max_duration:
-                    row = F.interpolate(row.view(1, 1, -1), size=max_duration, mode='linear', align_corners=True)
-                    row = row.view(-1)
-                out = row.view(1, -1, 1)
+                row = weights[step_idx]  # [n_frames_in_grid]
+
+                if mix_2d_grid_domain == "gen":
+                    # ✅ B 方案：横轴只映射到生成段（prompt 区固定用首列权重）
+                    # prompt 区 = 帧 0..prompt_end-1（lens_union 覆盖的 mask_a|mask_b 区域）
+                    # 用户画的网格列轴就是纯生成内容，不会被 prompt 占掉左侧 35~50%
+                    prompt_end = int(lens_union.amax().item())
+                    gen_size = max(1, int(max_duration.item()) - prompt_end)
+                    if row.shape[0] != gen_size:
+                        row_gen = F.interpolate(
+                            row.view(1, 1, -1), size=gen_size,
+                            mode='linear', align_corners=True,
+                        ).view(-1)
+                    else:
+                        row_gen = row
+                    # prompt 区用首列 row[0] 填充，保持语义连续
+                    prompt_fill = row[0:1].expand(prompt_end)
+                    out = torch.cat([prompt_fill, row_gen], dim=0).view(1, -1, 1)
+                else:
+                    # "full"：历史行为，横轴映射到 max_duration
+                    if row.shape[0] != max_duration:
+                        row = F.interpolate(
+                            row.view(1, 1, -1), size=max_duration,
+                            mode='linear', align_corners=True,
+                        ).view(-1)
+                    out = row.view(1, -1, 1)
                 return out if allow_extrapolation else out.clamp(0.0, 1.0)
             else:
                 raise ValueError(f"unknown mix_2d_mode: {mix_2d_mode}")

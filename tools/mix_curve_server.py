@@ -117,6 +117,7 @@ async def infer_endpoint(
     mix_a_start: float = Form(0.5),
     mix_a_end: float = Form(0.5),
     mix_2d_mode: str = Form("t_only"),
+    mix_2d_grid_domain: str = Form("full"),  # "full" or "gen"
     allow_extrapolation: bool = Form(True),
     mix_2d_weights: Optional[str] = Form(None),
     n_schedule: Optional[str] = Form(None),
@@ -209,6 +210,7 @@ async def infer_endpoint(
             mix_a_end=mix_a_end,
             mix_2d_mode=mix_2d_mode,
             mix_2d_weights=mix_grid,
+            mix_2d_grid_domain=mix_2d_grid_domain,
             n_schedule=None if n_schedule in ("none", "None", None) else n_schedule,
             n_a_start=n_a_start,
             n_a_end=n_a_end,
