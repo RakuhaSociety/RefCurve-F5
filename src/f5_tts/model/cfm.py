@@ -574,8 +574,13 @@ class CFM(nn.Module):
                     p, n = torch.chunk(pred_cfg, 2, dim=0)
                     return p + (p - n) * cfg_strength
 
-                step_a = torch.where(cond_mask, cond_a, torch.zeros_like(cond_a))
-                step_b = torch.where(cond_mask, cond_b, torch.zeros_like(cond_b))
+                # Each branch is masked to its own prompt region, not the union.
+                # Using the union mask causes the shorter reference's forward pass
+                # to see zero-padded frames as "prompt", forcing the model to use
+                # gen_text tokens to explain those frames — the result is swallowed
+                # content at the start of the output.
+                step_a = torch.where(mask_a, cond_a, torch.zeros_like(cond_a))
+                step_b = torch.where(mask_b, cond_b, torch.zeros_like(cond_b))
 
                 pa = guided_pred(step_a, text)
                 pb = guided_pred(step_b, text_b if text_b is not None else text)
