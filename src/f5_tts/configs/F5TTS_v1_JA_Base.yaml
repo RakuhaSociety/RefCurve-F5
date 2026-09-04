@@ -1,0 +1,68 @@
+hydra:
+  run:
+    dir: ckpts/${model.name}_${now:%Y-%m-%d}/${now:%H-%M-%S}
+
+datasets:
+  name: data/JmicaSingleSpeaker_custom
+  dataset_type: CustomDatasetPath
+  batch_size_per_gpu: 3200
+  batch_size_type: frame
+  max_samples: 8
+  num_workers: 8
+
+optim:
+  epochs: 100
+  max_updates: null
+  learning_rate: 1e-5
+  num_warmup_updates: 100
+  grad_accumulation_steps: 1
+  max_grad_norm: 1.0
+  bnb_optimizer: False
+
+model:
+  name: F5TTS_v1_JA_Base
+  tokenizer: custom
+  tokenizer_path: src/f5_tts/configs/vocab/F5TTS_v1_JA_Base/vocab.txt
+  tokenizer_contract_path: src/f5_tts/configs/vocab/F5TTS_v1_JA_Base/contract.json
+  backbone: DiT
+  arch:
+    dim: 1024
+    depth: 22
+    heads: 16
+    ff_mult: 2
+    text_dim: 512
+    text_mask_padding: True
+    qk_norm: null
+    conv_layers: 4
+    pe_attn_head: null
+    attn_backend: torch
+    attn_mask_enabled: False
+    checkpoint_activations: False
+  mel_spec:
+    target_sample_rate: 24000
+    n_mel_channels: 100
+    hop_length: 256
+    win_length: 1024
+    n_fft: 1024
+    mel_spec_type: vocos
+  vocoder:
+    is_local: True
+    local_path: ckpts/vocos-mel-24khz
+
+ckpts:
+  logger: null
+  wandb_project: RefCurve-F5-JA
+  wandb_run_name: ${model.name}
+  wandb_resume_id: null
+  log_samples: False
+  save_per_updates: 500
+  keep_last_n_checkpoints: 5
+  last_per_updates: 100
+  save_dir: ckpts/${model.name}
+  # save_dir 中的 model_last.pt / model_<update>.pt 始终优先于该初始化配置。
+  pretrained_init:
+    checkpoint_path: ckpts/F5TTS_v1_Base/model_1250000.safetensors
+    source_vocab_path: src/f5_tts/configs/vocab/F5TTS_v1_Base/vocab.txt
+    source_vocab_contract_path: src/f5_tts/configs/vocab/F5TTS_v1_Base/contract.json
+    remap_strategy: token
+    seed: 666

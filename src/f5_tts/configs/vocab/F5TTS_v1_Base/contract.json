@@ -1,0 +1,9 @@
+{
+  "identity": "f5tts-v1-base-official",
+  "provenance": "SWivid/F5-TTS v1.1.22 official F5TTS_v1_Base vocab",
+  "token_sequence_sha256": "91b3ccd6e8321c6bd4eee5232a19ef8b4e2a997da1fd0ff7793751662f09d9a0",
+  "token_count": 2545,
+  "embedding_rows": 2546,
+  "token_row_offset": 1,
+  "padding_row": 0
+}

@@ -1,0 +1,9 @@
+{
+  "identity": "refcurve-f5tts-v1-ja-base-v1",
+  "provenance": "Copied from Jmica JA_21999120 vocab_japanese.txt; frozen under a new RefCurve identity",
+  "token_sequence_sha256": "0ddbd7c1a14c73b797ba6846bc8c3419bb9ff683e47ed0ac7e0f960729d8a7bd",
+  "token_count": 2976,
+  "embedding_rows": 2977,
+  "token_row_offset": 1,
+  "padding_row": 0
+}
