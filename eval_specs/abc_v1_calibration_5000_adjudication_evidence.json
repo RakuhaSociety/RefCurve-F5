@@ -1,0 +1,26 @@
+{
+  "run_dir": "/root/F5-TTS/ckpts/visualnovel_calibration_ja/abc-v1-calibration-5000-20260829",
+  "bug_description": "scheduler_horizon_not_scaled_by_world_size",
+  "world_size": 8,
+  "split_batches": false,
+  "global_warmup_updates": 100,
+  "global_total_updates": 5000,
+  "bug_inner_warmup": 800,
+  "bug_inner_total": 5000,
+  "correct_inner_warmup": 800,
+  "correct_inner_total": 40000,
+  "lr_evidence": {
+    "update_0": "1.00e-13",
+    "update_1": "1.10e-07",
+    "update_50": "5.05e-07",
+    "update_100": "1.00e-06",
+    "update_500": "2.38e-06",
+    "update_625_approx": "1.00e-13",
+    "update_1000": "1.00e-13",
+    "update_2500": "1.00e-13",
+    "update_5000": "1.00e-13"
+  },
+  "diagnosis": "AcceleratedScheduler steps inner_scheduler by num_processes on each global optimizer update when split_batches=False. Bug version applied multiplier to warmup but not to total, causing LR to reach floor at approximately global_update = inner_total / num_processes = 5000 / 8 = 625.",
+  "forensic_disposition": "invalid_for_calibration",
+  "corrected_run": "corrected-calibration-5000-20260905"
+}
