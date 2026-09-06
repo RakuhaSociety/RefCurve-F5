@@ -82,9 +82,9 @@
         </select>
       </label>
       <label>mix_2d_grid_domain:
-        <select id="gridDomain" title="full: 横轴映射 prompt+生成段（历史行为）; gen: 只映射生成段，prompt 区用首列权重填充">
-          <option value="full" selected>full（历史行为）</option>
-          <option value="gen">gen（生成段对齐）</option>
+        <select id="gridDomain" title="gen（推荐）: 横轴映射生成段，prompt 用首列填充; full: 横轴映射 prompt+生成段，左侧 ~35-50% 是 prompt 区">
+          <option value="gen" selected>gen（生成段对齐）</option>
+          <option value="full">full（含 prompt）</option>
         </select>
       </label>
       <label>mix_2d_mode:
