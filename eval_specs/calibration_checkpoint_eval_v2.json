@@ -54,10 +54,13 @@
       "vocab_contract_path": "src/f5_tts/configs/vocab/F5TTS_v1_JA_Base/contract.json",
       "expected_embedding_rows": 2977,
       "expected_embedding_width": 512,
-      "checkpoint_sha256": null,
+      "checkpoint_sha256": "35e7e5162e690a798abf196966dada500b10b125894845f3081444fec2eb99f4",
       "expected_vocab_identity": "refcurve-f5tts-v1-ja-base-v1",
       "expected_token_sequence_sha256": "0ddbd7c1a14c73b797ba6846bc8c3419bb9ff683e47ed0ac7e0f960729d8a7bd",
-      "checkpoint_provenance_path": "ckpts/F5TTS_v1_JA_Update0_Eval/provenance.json"
+      "checkpoint_provenance_path": "ckpts/F5TTS_v1_JA_Update0_Eval/provenance.json",
+      "config_sha256": "3d98522e01ba91f82901e3dd1d96aab2a1492956ead57e7a173c97676740c65e",
+      "vocab_sha256": "f405cceeeaf2461b8ee2247118f93140db617ddc25d1447790d7e93a761f89e3",
+      "vocab_contract_sha256": "2954cd0d4fadd98d5845c059d8179a6cea93fa1b684ff76dfb0e44fcd4d2eba0"
     },
     {
       "id": "jmica_anchor_ema",
@@ -71,9 +74,12 @@
       "vocab_contract_path": "src/f5_tts/configs/vocab/F5TTS_v1_JA_Base/contract.json",
       "expected_embedding_rows": 2977,
       "expected_embedding_width": 512,
-      "checkpoint_sha256": null,
+      "checkpoint_sha256": "d1c159337dcd3daf63d7786f258781b4e849de557dc401f5917b24027c0b8be2",
       "expected_vocab_identity": "refcurve-f5tts-v1-ja-base-v1",
-      "expected_token_sequence_sha256": "0ddbd7c1a14c73b797ba6846bc8c3419bb9ff683e47ed0ac7e0f960729d8a7bd"
+      "expected_token_sequence_sha256": "0ddbd7c1a14c73b797ba6846bc8c3419bb9ff683e47ed0ac7e0f960729d8a7bd",
+      "config_sha256": "38df6f4999807ce0b7e8483c500896aaab0847eb599582fccc2bee544ea38ec6",
+      "vocab_sha256": "f405cceeeaf2461b8ee2247118f93140db617ddc25d1447790d7e93a761f89e3",
+      "vocab_contract_sha256": "2954cd0d4fadd98d5845c059d8179a6cea93fa1b684ff76dfb0e44fcd4d2eba0"
     },
     {
       "id": "corrected_calibration_500_ema",
@@ -94,7 +100,10 @@
       "expected_embedding_rows": 2977,
       "expected_embedding_width": 512,
       "expected_vocab_identity": "refcurve-f5tts-v1-ja-base-v1",
-      "expected_token_sequence_sha256": "0ddbd7c1a14c73b797ba6846bc8c3419bb9ff683e47ed0ac7e0f960729d8a7bd"
+      "expected_token_sequence_sha256": "0ddbd7c1a14c73b797ba6846bc8c3419bb9ff683e47ed0ac7e0f960729d8a7bd",
+      "config_sha256": "3d98522e01ba91f82901e3dd1d96aab2a1492956ead57e7a173c97676740c65e",
+      "vocab_sha256": "f405cceeeaf2461b8ee2247118f93140db617ddc25d1447790d7e93a761f89e3",
+      "vocab_contract_sha256": "2954cd0d4fadd98d5845c059d8179a6cea93fa1b684ff76dfb0e44fcd4d2eba0"
     },
     {
       "id": "corrected_calibration_1000_ema",
@@ -115,7 +124,10 @@
       "expected_embedding_rows": 2977,
       "expected_embedding_width": 512,
       "expected_vocab_identity": "refcurve-f5tts-v1-ja-base-v1",
-      "expected_token_sequence_sha256": "0ddbd7c1a14c73b797ba6846bc8c3419bb9ff683e47ed0ac7e0f960729d8a7bd"
+      "expected_token_sequence_sha256": "0ddbd7c1a14c73b797ba6846bc8c3419bb9ff683e47ed0ac7e0f960729d8a7bd",
+      "config_sha256": "3d98522e01ba91f82901e3dd1d96aab2a1492956ead57e7a173c97676740c65e",
+      "vocab_sha256": "f405cceeeaf2461b8ee2247118f93140db617ddc25d1447790d7e93a761f89e3",
+      "vocab_contract_sha256": "2954cd0d4fadd98d5845c059d8179a6cea93fa1b684ff76dfb0e44fcd4d2eba0"
     },
     {
       "id": "corrected_calibration_1500_ema",
@@ -136,7 +148,10 @@
       "expected_embedding_rows": 2977,
       "expected_embedding_width": 512,
       "expected_vocab_identity": "refcurve-f5tts-v1-ja-base-v1",
-      "expected_token_sequence_sha256": "0ddbd7c1a14c73b797ba6846bc8c3419bb9ff683e47ed0ac7e0f960729d8a7bd"
+      "expected_token_sequence_sha256": "0ddbd7c1a14c73b797ba6846bc8c3419bb9ff683e47ed0ac7e0f960729d8a7bd",
+      "config_sha256": "3d98522e01ba91f82901e3dd1d96aab2a1492956ead57e7a173c97676740c65e",
+      "vocab_sha256": "f405cceeeaf2461b8ee2247118f93140db617ddc25d1447790d7e93a761f89e3",
+      "vocab_contract_sha256": "2954cd0d4fadd98d5845c059d8179a6cea93fa1b684ff76dfb0e44fcd4d2eba0"
     },
     {
       "id": "corrected_calibration_2000_ema",
@@ -157,7 +172,10 @@
       "expected_embedding_rows": 2977,
       "expected_embedding_width": 512,
       "expected_vocab_identity": "refcurve-f5tts-v1-ja-base-v1",
-      "expected_token_sequence_sha256": "0ddbd7c1a14c73b797ba6846bc8c3419bb9ff683e47ed0ac7e0f960729d8a7bd"
+      "expected_token_sequence_sha256": "0ddbd7c1a14c73b797ba6846bc8c3419bb9ff683e47ed0ac7e0f960729d8a7bd",
+      "config_sha256": "3d98522e01ba91f82901e3dd1d96aab2a1492956ead57e7a173c97676740c65e",
+      "vocab_sha256": "f405cceeeaf2461b8ee2247118f93140db617ddc25d1447790d7e93a761f89e3",
+      "vocab_contract_sha256": "2954cd0d4fadd98d5845c059d8179a6cea93fa1b684ff76dfb0e44fcd4d2eba0"
     },
     {
       "id": "corrected_calibration_2500_ema",
@@ -178,7 +196,10 @@
       "expected_embedding_rows": 2977,
       "expected_embedding_width": 512,
       "expected_vocab_identity": "refcurve-f5tts-v1-ja-base-v1",
-      "expected_token_sequence_sha256": "0ddbd7c1a14c73b797ba6846bc8c3419bb9ff683e47ed0ac7e0f960729d8a7bd"
+      "expected_token_sequence_sha256": "0ddbd7c1a14c73b797ba6846bc8c3419bb9ff683e47ed0ac7e0f960729d8a7bd",
+      "config_sha256": "3d98522e01ba91f82901e3dd1d96aab2a1492956ead57e7a173c97676740c65e",
+      "vocab_sha256": "f405cceeeaf2461b8ee2247118f93140db617ddc25d1447790d7e93a761f89e3",
+      "vocab_contract_sha256": "2954cd0d4fadd98d5845c059d8179a6cea93fa1b684ff76dfb0e44fcd4d2eba0"
     },
     {
       "id": "corrected_calibration_3000_ema",
@@ -199,7 +220,10 @@
       "expected_embedding_rows": 2977,
       "expected_embedding_width": 512,
       "expected_vocab_identity": "refcurve-f5tts-v1-ja-base-v1",
-      "expected_token_sequence_sha256": "0ddbd7c1a14c73b797ba6846bc8c3419bb9ff683e47ed0ac7e0f960729d8a7bd"
+      "expected_token_sequence_sha256": "0ddbd7c1a14c73b797ba6846bc8c3419bb9ff683e47ed0ac7e0f960729d8a7bd",
+      "config_sha256": "3d98522e01ba91f82901e3dd1d96aab2a1492956ead57e7a173c97676740c65e",
+      "vocab_sha256": "f405cceeeaf2461b8ee2247118f93140db617ddc25d1447790d7e93a761f89e3",
+      "vocab_contract_sha256": "2954cd0d4fadd98d5845c059d8179a6cea93fa1b684ff76dfb0e44fcd4d2eba0"
     },
     {
       "id": "corrected_calibration_3500_ema",
@@ -220,7 +244,10 @@
       "expected_embedding_rows": 2977,
       "expected_embedding_width": 512,
       "expected_vocab_identity": "refcurve-f5tts-v1-ja-base-v1",
-      "expected_token_sequence_sha256": "0ddbd7c1a14c73b797ba6846bc8c3419bb9ff683e47ed0ac7e0f960729d8a7bd"
+      "expected_token_sequence_sha256": "0ddbd7c1a14c73b797ba6846bc8c3419bb9ff683e47ed0ac7e0f960729d8a7bd",
+      "config_sha256": "3d98522e01ba91f82901e3dd1d96aab2a1492956ead57e7a173c97676740c65e",
+      "vocab_sha256": "f405cceeeaf2461b8ee2247118f93140db617ddc25d1447790d7e93a761f89e3",
+      "vocab_contract_sha256": "2954cd0d4fadd98d5845c059d8179a6cea93fa1b684ff76dfb0e44fcd4d2eba0"
     },
     {
       "id": "corrected_calibration_4000_ema",
@@ -241,7 +268,10 @@
       "expected_embedding_rows": 2977,
       "expected_embedding_width": 512,
       "expected_vocab_identity": "refcurve-f5tts-v1-ja-base-v1",
-      "expected_token_sequence_sha256": "0ddbd7c1a14c73b797ba6846bc8c3419bb9ff683e47ed0ac7e0f960729d8a7bd"
+      "expected_token_sequence_sha256": "0ddbd7c1a14c73b797ba6846bc8c3419bb9ff683e47ed0ac7e0f960729d8a7bd",
+      "config_sha256": "3d98522e01ba91f82901e3dd1d96aab2a1492956ead57e7a173c97676740c65e",
+      "vocab_sha256": "f405cceeeaf2461b8ee2247118f93140db617ddc25d1447790d7e93a761f89e3",
+      "vocab_contract_sha256": "2954cd0d4fadd98d5845c059d8179a6cea93fa1b684ff76dfb0e44fcd4d2eba0"
     },
     {
       "id": "corrected_calibration_4500_ema",
@@ -262,7 +292,10 @@
       "expected_embedding_rows": 2977,
       "expected_embedding_width": 512,
       "expected_vocab_identity": "refcurve-f5tts-v1-ja-base-v1",
-      "expected_token_sequence_sha256": "0ddbd7c1a14c73b797ba6846bc8c3419bb9ff683e47ed0ac7e0f960729d8a7bd"
+      "expected_token_sequence_sha256": "0ddbd7c1a14c73b797ba6846bc8c3419bb9ff683e47ed0ac7e0f960729d8a7bd",
+      "config_sha256": "3d98522e01ba91f82901e3dd1d96aab2a1492956ead57e7a173c97676740c65e",
+      "vocab_sha256": "f405cceeeaf2461b8ee2247118f93140db617ddc25d1447790d7e93a761f89e3",
+      "vocab_contract_sha256": "2954cd0d4fadd98d5845c059d8179a6cea93fa1b684ff76dfb0e44fcd4d2eba0"
     },
     {
       "id": "corrected_calibration_5000_ema",
@@ -283,39 +316,42 @@
       "expected_embedding_rows": 2977,
       "expected_embedding_width": 512,
       "expected_vocab_identity": "refcurve-f5tts-v1-ja-base-v1",
-      "expected_token_sequence_sha256": "0ddbd7c1a14c73b797ba6846bc8c3419bb9ff683e47ed0ac7e0f960729d8a7bd"
+      "expected_token_sequence_sha256": "0ddbd7c1a14c73b797ba6846bc8c3419bb9ff683e47ed0ac7e0f960729d8a7bd",
+      "config_sha256": "3d98522e01ba91f82901e3dd1d96aab2a1492956ead57e7a173c97676740c65e",
+      "vocab_sha256": "f405cceeeaf2461b8ee2247118f93140db617ddc25d1447790d7e93a761f89e3",
+      "vocab_contract_sha256": "2954cd0d4fadd98d5845c059d8179a6cea93fa1b684ff76dfb0e44fcd4d2eba0"
     }
   ],
   "references": [
     {
       "id": "ref_neutral",
-      "audio": null,
+      "audio": "eval_refs/calibration_v2/ref_neutral.wav",
       "audio_sha256": null,
-      "text_original": null,
+      "text_original": "えっと、それって本当に大丈夫なの？もう少し教えてもらえる？",
       "text_kana": null,
       "emotion_label": "neutral",
       "data_relation": null,
-      "notes": "prepare フェーズで手動確認後に埋める。OOV除外または訓練済み録音から選択。"
+      "notes": "core_conv_01 from Jmica anchor"
     },
     {
       "id": "ref_expressive",
-      "audio": null,
+      "audio": "eval_refs/calibration_v2/ref_expressive.wav",
       "audio_sha256": null,
-      "text_original": null,
+      "text_original": "やっぱりそうか！ずっと待ってたんだよ、こういう日を！本当によかった！",
       "text_kana": null,
       "emotion_label": "expressive",
       "data_relation": null,
-      "notes": "感情テキスト用。強い表現か活発な台詞。"
+      "notes": "core_emo_hi_01 from Jmica anchor"
     },
     {
       "id": "ref_soft",
-      "audio": null,
+      "audio": "eval_refs/calibration_v2/ref_soft.wav",
       "audio_sha256": null,
-      "text_original": null,
+      "text_original": "……もう、どうしたらいいんだろ。これ以上続けるのが怖くて。",
       "text_kana": null,
       "emotion_label": "soft",
       "data_relation": null,
-      "notes": "柔らかい/ネガティブな感情テキスト用。"
+      "notes": "core_emo_lo_01 from Jmica anchor"
     }
   ],
   "texts": [
