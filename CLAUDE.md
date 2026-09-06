@@ -90,11 +90,13 @@ f5-tts_infer-cli --model F5TTS_v1_Base \
 | `n_schedule`, `n_a_start`, `n_a_end` | mel 帧位置维度 n 的曲线与起止权重 |
 | `mix_2d_mode` | `t_only`（默认） / `n_only` / `multiply` / `add` / `max` / `min` / `2d_grid` |
 | `mix_2d_weights` | `2d_grid` 模式下的权重矩阵 `[steps, n_frames]`，该模式下必传否则抛 `ValueError` |
+| `mix_2d_grid_domain` | `"full"`（默认）网格映射到整个 duration（prompt + 生成段）；`"gen"` 网格只映射到生成段，prompt 区用首列填充 |
 | `allow_extrapolation` | 为 False 时所有权重 `clamp(0,1)`；为 True 才允许 >1 放大 / <0 反相 |
 
 三个关键实现点：
 
-- `mix_on` 决定融合作用在哪一层：`cond` 分支在 [cfm.py:454](src/f5_tts/model/cfm.py#L454)，`pred` 分支在 [cfm.py:468](src/f5_tts/model/cfm.py#L468)。**注意 `mix_on` 只在 `CFM.sample()` 上存在，`infer_process()` 没有把它透传出来**，所以从 Gradio/CLI 走进来时恒为 `cond`。想试 `pred` 需要自己加透传。
+- `mix_on` 决定融合作用在哪一层：`cond` 分支、`pred` 分支、`two_stage` 模式（先双路独立生成 mel，再混合作为 pred 参考）、`output` 模式（mel 输出层混合）。从 Gradio/曲线后端进来时可选全部四种模式。
+- `mix_2d_grid_domain` 控制 `2d_grid` 网格的 n 轴映射：`"full"` 模式下网格列映射到整个 `max_duration`（prompt + 生成段），约 35-50% 的列落在不可听的 prompt 区；`"gen"` 模式下网格列只映射到生成段，prompt 区用首列权重填充，100% 列都对应可听内容。**多块场景下，网格在每块内独立重复**（架构特性）。
 - `alpha_of_t(t)` 返回标量，`alpha_of_n()` 返回 `[1, n, 1]`（在循环外算一次），二者按 `mix_2d_mode` 组合。加新曲线就改这两个函数，或直接传 callable。
 - `slerp_with_norm()`（[cfm.py:36](src/f5_tts/model/cfm.py#L36)）方向用 SLERP、幅度用 LERP；`log_domain_blend()`（[cfm.py:84](src/f5_tts/model/cfm.py#L84)）是对数域几何平均，适合能量类信号。
 
@@ -143,6 +145,54 @@ python src/f5_tts/socket_server.py                     # 实时流式服务
 微调要点：从 F5TTS_v1_Base 起步，学习率低于预训练（如 1e-5）；早期微调可设 `use_ema=False` 避免预训练 EMA 主导；`batch_size_type` 可选 `frame` 或 `sample`；WandB 需 `wandb login`，离线用 `WANDB_MODE=offline`。设备自动探测顺序 CUDA → XPU → MPS → CPU。声码器 `vocos`（默认，更快）或 `bigvgan`。
 
 原版推理经验仍适用：参考音频 <12 秒且结尾留约 1 秒静音；单次生成上限约 30 秒（含提示音）；更长文本自动分块；大写字母逐字母读；数字需预先转成目标语言文字。
+
+## 训练与 Scheduler 修复
+
+### Scheduler Bug 与修复（2026-09-05）
+
+**Bug 描述**：原版 `trainer.py` 在 `split_batches=False` 多 GPU 训练时，只对 `num_warmup_updates` 应用了 world-size multiplier，但未对 scheduler 的 `num_training_steps` 应用。导致 AcceleratedScheduler 内部步进速度是实际 optimizer update 的 `world_size` 倍，LR 在约 `global_update = total / world_size` 时提前触底（8 GPU 时是 625 步）。
+
+**修复**（[src/f5_tts/model/trainer.py](src/f5_tts/model/trainer.py)）：
+- `_training_update_horizon()` 现在返回的 `num_training_steps` 已经应用 multiplier
+- 在 global units 计算完成后，统一把 warmup 和 total 都转换到 inner units
+- Multiplier = `1 if accelerator.split_batches else accelerator.num_processes`
+- 8 GPU `split_batches=False` 时：inner warmup = 800，inner total = 40000（正确）
+- Bug 版本：inner warmup = 800，inner total = 5000（错误，horizon 未缩放）
+
+**验证**：
+- `tests/test_trainer_scheduler.py`：模拟 1 GPU vs 8 GPU 的 LR 轨迹一致性
+- Smoke runs：120-update 训练验证 LR 符合公式
+- 实际 5000-update corrected run：LR 轨迹完全符合预期
+
+### Corrected Calibration Run
+
+**Run 位置**（远端）：`/root/F5-TTS/ckpts/visualnovel_calibration_ja/corrected-calibration-5000-20260905/`
+
+**Run identity**：`2b5705a27a3a5da5a8de85f953d55d04f95e3ed8611bb2ee2343284a0e5e3151`
+
+**关键参数**：
+- 数据集：`/data/visualnovel/aggregates/wave-abc-v1-exclude-conflicts`（与 bug run 完全相同）
+- Source checkpoint：官方 v1 EMA `model_1250000.safetensors`，vocab remap seed 666
+- Scheduler：global warmup=100，global total=5000；inner warmup=800，inner total=40000
+- 8×RTX 4090，BF16，`split_batches=False`
+
+**Checkpoints**：9 个完整 EMA（500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500）+ `model_last.pt`（= 5000）
+
+**LR 验证**（关键锚点）：
+- update 100: `1.00e-05`（warmup 峰值）✅
+- update 500: `9.18e-06`（bug run 的 3.9×）✅
+- update 1000: `8.16e-06`（bug run 的 8千万×）✅
+- update 2500: `5.10e-06`（仍是峰值的 51%）✅
+- update 5000: `1.00e-13`（正确到达 floor）✅
+
+**对比 bug run**：旧 run `abc-v1-calibration-5000-20260829` 在 update 625 左右就到达 `1e-13` floor，之后 4375 个 updates 的权重几乎不再变化。Corrected run 的有效训练时间延长了 4× 以上。
+
+### 训练相关工具
+
+- `src/f5_tts/train/run_adjudication.py`：为完成的 run 创建 immutable forensic verdict sidecar
+- `src/f5_tts/train/run_manifest.py`：训练开始时记录 code/dataset/config/environment identity
+- `tools/train_visualnovel_calibration_ja.sh`：校准训练的启动脚本（支持环境变量覆盖）
+- `tools/smoke_scheduler_world_size.py`：1 GPU vs 8 GPU scheduler 不变性验证脚本
 
 ## 代码规范
 
