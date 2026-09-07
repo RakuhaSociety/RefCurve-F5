@@ -136,7 +136,10 @@ def transcribe_ja(wav_path: str) -> str:
             asr = get_paraformer_asr(device=device)
             results = asr.generate(input=wav_path, generate_kwargs={"language": "japanese", "task": "transcribe"})
             raw = "".join(r.get("text", "") for r in results) if isinstance(results, list) else str(results)
-            return clean_ja_text(raw).strip()
+            cleaned = clean_ja_text(raw).strip()
+            if not cleaned:
+                raise ValueError("paraformer returned empty transcription for Japanese audio")
+            return cleaned
         except Exception as paraformer_error:
             try:
                 segments, _ = asr_model().transcribe(
