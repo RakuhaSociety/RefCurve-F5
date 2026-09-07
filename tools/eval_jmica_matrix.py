@@ -534,8 +534,8 @@ def cmd_generate(args: argparse.Namespace) -> int:
                     continue
                 started = utc_now()
                 try:
-                    ref_audio, _ = preprocess_ref_audio_text(job["reference"]["audio"], job["reference"]["text_kana"])
-                    audio, sample_rate, _ = infer_process(ref_audio, job["reference"]["text_kana"], job["text"]["text_kana"], model, vocoder, device=device, seed=job["seed"], text_frontend=lambda texts: [list(x) for x in texts], **infer_args)
+                    ref_audio, ref_text_processed = preprocess_ref_audio_text(job["reference"]["audio"], job["reference"]["text_kana"])
+                    audio, sample_rate, _ = infer_process(ref_audio, ref_text_processed, job["text"]["text_kana"], model, vocoder, device=device, seed=job["seed"], text_frontend=lambda texts: [list(x) for x in texts], **infer_args)
                     # Vocos 输出偶尔超过 [-1, 1]。直接写 PCM16 会硬削波且不可逆，
                     # 先对每条结果做纯增益峰值归一化；它不改变音色、时长或相对动态。
                     import numpy as np
