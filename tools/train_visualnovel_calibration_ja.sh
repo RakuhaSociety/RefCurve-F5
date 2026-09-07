@@ -88,6 +88,28 @@ if [[ -e "$RUN_DIR" ]]; then
   printf 'Resuming explicitly named calibration run: %s\n' "$RUN_DIR"
 fi
 
+# ✅ 磁盘空间预检。一个 checkpoint 约 5.4G，keep_last_n=10 加 model_last 约 60G。
+# 空间不足时 torch 会在 accelerator.save() 里以 "PytorchStreamWriter ... unexpected pos"
+# 报错——看起来像序列化 bug，实为磁盘满，且要等训练跑完才暴露。宁可在这里先失败。
+# 同理，$TMPDIR / numba cache / Hydra 输出目录若落在满盘上，会分别以
+# "No usable temporary directory"、"cannot cache function: no locator available"、
+# "OSError: [Errno 28]" 的面貌出现，全都不像磁盘问题。
+REQUIRED_RUN_GB="${VISUALNOVEL_CALIBRATION_REQUIRED_GB:-70}"
+mkdir -p "$RUN_ROOT"
+avail_gb=$(df -BG --output=avail "$RUN_ROOT" | tail -1 | tr -dc '0-9')
+if [[ -z "$avail_gb" ]]; then
+  printf 'Cannot determine free space for run root: %s\n' "$RUN_ROOT" >&2
+  exit 1
+fi
+if (( avail_gb < REQUIRED_RUN_GB )); then
+  printf 'Insufficient space at run root %s: %sG available, %sG required.\n' \
+    "$RUN_ROOT" "$avail_gb" "$REQUIRED_RUN_GB" >&2
+  printf 'Point VISUALNOVEL_CALIBRATION_RUN_ROOT at a larger volume (and TMPDIR / NUMBA_CACHE_DIR / hydra.run.dir with it).\n' >&2
+  exit 1
+fi
+printf 'preflight: run_root=%s avail=%sG required=%sG tmpdir=%s\n' \
+  "$RUN_ROOT" "$avail_gb" "$REQUIRED_RUN_GB" "${TMPDIR:-/tmp}"
+
 "$PYTHON" - "$NUM_PROCESSES" <<'PY'
 import sys
 
@@ -103,6 +125,22 @@ for index in range(required):
 print(f"preflight: torch={torch.__version__} cuda={torch.version.cuda} gpus_required={required} available={available} bf16=ok")
 PY
 
+# ✅ Hydra 的输出目录在 config 里是仓库内相对路径（ckpts/${model.name}_.../...），
+# 所以即便 run root 指到大盘，Hydra 仍会往仓库所在的盘写并可能撞上 ENOSPC。
+# 这里只暴露"目录位置"这一个旋钮——仍然不接受自由 Hydra 参数，训练协议不可变。
+if [[ -n "${VISUALNOVEL_CALIBRATION_HYDRA_RUN_DIR:-}" ]]; then
+  case "$VISUALNOVEL_CALIBRATION_HYDRA_RUN_DIR" in
+    *[$'\n\t ']*|*'='*)
+      printf 'VISUALNOVEL_CALIBRATION_HYDRA_RUN_DIR must be a plain path: %s\n' \
+        "$VISUALNOVEL_CALIBRATION_HYDRA_RUN_DIR" >&2
+      exit 1
+      ;;
+  esac
+  HYDRA_RUN_DIR_ARG=("hydra.run.dir=$VISUALNOVEL_CALIBRATION_HYDRA_RUN_DIR")
+else
+  HYDRA_RUN_DIR_ARG=()
+fi
+
 # Deliberately no free-form Hydra arguments: calibration settings are an immutable protocol.
 exec "$PYTHON" -m f5_tts.train.operation_lock_run \
   --lock-root "$OPERATION_LOCK_ROOT" \
@@ -111,6 +149,7 @@ exec "$PYTHON" -m f5_tts.train.operation_lock_run \
   -- \
   "$ACCELERATE" launch $LAUNCH_PARALLEL --mixed_precision bf16 \
   src/f5_tts/train/train.py --config-name F5TTS_v1_JA_Base.yaml \
+  ${HYDRA_RUN_DIR_ARG+"${HYDRA_RUN_DIR_ARG[@]}"} \
   "datasets.name=$DATASET_DIR" \
   datasets.dataset_type=ShardedArrowDataset \
   datasets.num_workers=1 \
