@@ -192,7 +192,28 @@ python src/f5_tts/socket_server.py                     # 实时流式服务
 - `src/f5_tts/train/run_adjudication.py`：为完成的 run 创建 immutable forensic verdict sidecar
 - `src/f5_tts/train/run_manifest.py`：训练开始时记录 code/dataset/config/environment identity
 - `tools/train_visualnovel_calibration_ja.sh`：校准训练的启动脚本（支持环境变量覆盖）
+- `tools/train_calibration_remote_data_volume.sh`：远端专用包装，把所有写路径钉在 `/data`
 - `tools/smoke_scheduler_world_size.py`：1 GPU vs 8 GPU scheduler 不变性验证脚本
+
+Smoke 验证走 launcher 自带的两个旋钮，不要另写启动脚本——`VISUALNOVEL_CALIBRATION_SMOKE_UPDATES=N`
+只提前停步而不改 `optim.max_updates=5000`（scheduler horizon 与正式 run 完全一致，LR 轨迹才有可比性），
+`VISUALNOVEL_CALIBRATION_NUM_PROCESSES=N` 切 world size，于是 1 卡与 8 卡走同一条启动路径。
+smoke 长度必须 **>100**：warmup 段（≤100）无论 scheduler 修没修都一致，bug 只在第一个 decay step
+（update 101）才显形。
+
+### 远端训练环境（183.147.142.130:9000）
+
+三件事会让默认命令直接失败，且报错都不像真正的原因：
+
+- **解释器**：训练用 `/root/f5-tts-env/bin/python`。系统 `python3` 没有 torch 也没有 pytest。
+- **磁盘**：根盘 445G 易满，`/data` 才有 3.5T。训练涉及五个写路径（run root、operation lock、
+  `$TMPDIR`、numba cache、`hydra.run.dir`），漏一个就失败，且分别伪装成
+  `PytorchStreamWriter unexpected pos`（像 torch 序列化 bug）、`No usable temporary directory`
+  （挂在 `import torch`）、`cannot cache function: no locator available`（挂在 librosa）、
+  `OSError: [Errno 28]`。用 `tools/train_calibration_remote_data_volume.sh` 一次性设好；
+  launcher 现在也会在碰 GPU 前预检 run root 空间。
+- **代码同步**：远端无法直连 GitHub（`GnuTLS recv error`）。路径是本地 `git push train main`
+  → 裸库 `/root/F5-TTS-remote.git` → 远端 `git pull origin main`。
 
 ## 代码规范
 
